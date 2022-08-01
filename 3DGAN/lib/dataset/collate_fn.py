@@ -33,6 +33,6 @@ def collate_gan_views(batch):
   xray1 = [x[1] for x in batch]
   xray2 = [x[2] for x in batch]
   file_path = [x[3] for x in batch]
-  template = [x[4] for x in batch]
+  #template = [x[4] for x in batch]
 
-  return torch.stack(ct), [torch.stack(xray1), torch.stack(xray2)], file_path, template
+  return torch.stack(ct), [torch.stack(xray1), torch.stack(xray2)], file_path #,template

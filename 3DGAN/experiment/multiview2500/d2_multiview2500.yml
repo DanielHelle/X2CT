@@ -36,15 +36,15 @@ NETWORK:
 
 TRAIN:
   print_freq: 10
-  save_epoch_freq: 10
+  save_epoch_freq: 1
   save_latest_freq: 1000
   print_img_freq: 500
   niter: 50
-  niter_decay: 50
+  niter_decay: 40
   beta1: 0.5
   beta2: 0.99
   lr: 0.0002
-  batch_size: 4
+  batch_size: 3
   weight_decay_if: False
 
 CTGAN:

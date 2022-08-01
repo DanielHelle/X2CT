@@ -45,10 +45,6 @@ class AlignDataSet(Base_DataSet):
 
 
   def init_template(self):
-    #Take first traning CT scan from data/train.txt make sure it doesn't reapper in test
-    #Talk to Wu or someone else and see if I should remove it for training not as 3rd input but as input to reconstruction loss training error function
-    #could be as easy as removing LIDC-IDRI-0936.20000101.5169.2.1 from train.txt and ofc test.txt if it is there for some reason
-    #It is not there
     file_path = os.path.join("./data/LIDC-HDF5-256","LIDC-IDRI-0936.20000101.5169.2.1",'ct_xray_data'+self.ext)
     hdf5 = h5py.File(file_path, 'r')
     ct_data = np.asarray(hdf5['ct'])

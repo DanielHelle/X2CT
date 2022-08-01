@@ -260,6 +260,587 @@ class ResUNet_up(nn.Module):
 
 
         return output4,encoder_fmaps,decoder_fmaps
+
+
+class ResUNet_up(nn.Module):
+        #output1 = map1, output2 = map2, output3 = map3, output4 = map4
+        #long_range1=16, long_range2=32, long_range3=64, long_range4=128
+  
+    def __init__(self,in_channel,out_channel,training, encoder):
+        super(ResUNet_up,self).__init__()
+        #self.w = torch.nn.Parameter(torch.tensor([0.5,0.5]))
+        self.drop_rate = 0.2
+        self.training = training
+
+        self.encoder = encoder
+
+        #All sizes of channels and width height and depht are divided by 2
+        #Even longranges are maxpooled and down_conv so to halv (c,w,h,d)
+        self.down_conv = nn.Sequential(
+            nn.Conv3d(256,int(256/2),kernel_size=3,stride=1,padding=1),
+            nn.PReLU(int(256/2)),
+            nn.MaxPool3d(2,stride=2, padding=0),
+            nn.BatchNorm3d(int(256/2))
+        )
+
+ 
+        
+        self.up_conv2 = nn.Sequential(
+            nn.ConvTranspose3d(128, 64, 2, 2),
+            nn.PReLU(64)
+        )
+
+        self.up_conv3 = nn.Sequential(
+            nn.ConvTranspose3d(64, 32, 2, 2),
+            nn.PReLU(32)
+        )
+
+        self.up_conv4 = nn.Sequential(
+            nn.ConvTranspose3d(32, 16, 2, 2),
+            nn.PReLU(16)
+        )
+        self.conv_long_range1 = nn.Sequential(
+            nn.Conv3d(16,8,kernel_size=3,stride=1,padding=1),
+            nn.PReLU(8),
+            nn.MaxPool3d(2,stride=2, padding=0),
+            nn.BatchNorm3d(8)
+            
+        )
+        self.conv_long_range2 = nn.Sequential(
+            nn.Conv3d(32,16,kernel_size=3,stride=1,padding=1),
+            nn.PReLU(16),
+
+            nn.MaxPool3d(2,stride=2, padding=0)
+            
+        )
+        self.conv_long_range3 = nn.Sequential(
+            nn.Conv3d(64,32,kernel_size=3,stride=1,padding=1),
+            nn.PReLU(32),
+            nn.MaxPool3d(2,stride=2, padding=0),
+            nn.BatchNorm3d(32)
+        )
+        self.conv_long_range4 = nn.Sequential(
+            nn.Conv3d(128,64,kernel_size=3,stride=1,padding=1),
+            nn.PReLU(64),
+            nn.MaxPool3d(2,stride=2, padding=0),
+            nn.BatchNorm3d(64)
+        )
+        self.decoder_stage1 = nn.Sequential(
+            nn.Conv3d(64, 128, 3, 1, padding=1),
+            nn.PReLU(128),
+
+            nn.Conv3d(128, 128, 3, 1, padding=1),
+            nn.PReLU(128),
+
+            nn.Conv3d(128, 128, 3, 1, padding=1),
+            nn.PReLU(128),
+        )
+
+        self.decoder_stage2 = nn.Sequential(
+            nn.Conv3d(64+32, 64, 3, 1, padding=1),
+            nn.PReLU(64),
+
+            nn.Conv3d(64, 64, 3, 1, padding=1),
+            nn.PReLU(64),
+
+            nn.Conv3d(64, 64, 3, 1, padding=1),
+            nn.PReLU(64),
+        )
+
+        self.decoder_stage3 = nn.Sequential(
+            nn.Conv3d(32 +16, 32, 3, 1, padding=1),
+            nn.PReLU(32),
+
+            nn.Conv3d(32, 32, 3, 1, padding=1),
+            nn.PReLU(32),
+
+            nn.Conv3d(32, 32, 3, 1, padding=1),
+            nn.PReLU(32),
+        )
+        self.decoder_stage4 = nn.Sequential(
+            nn.Conv3d(16+8, 16, 3, 1, padding=1),
+            nn.PReLU(16),
+
+            nn.Conv3d(16, 16, 3, 1, padding=1),
+            nn.PReLU(16),
+        )
+        
+        self.long_range4_map = nn.Sequential(
+            nn.Conv3d(128, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(2, 2, 2), mode='trilinear', align_corners=False),
+        )
+        
+        self.long_range3_map = nn.Sequential(
+            nn.Conv3d(64, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(4, 4, 4), mode='trilinear', align_corners=False),
+        )
+
+        
+        self.long_range2_map = nn.Sequential(
+            nn.Conv3d(32, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(8, 8, 8), mode='trilinear', align_corners=False),
+        )
+
+        
+        self.long_range1_map = nn.Sequential(
+            nn.Conv3d(16, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(16, 16, 16), mode='trilinear', align_corners=False),
+           
+        )
+
+        
+        self.map4 = nn.Sequential(
+            nn.Conv3d(16, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(2, 2, 2), mode='trilinear', align_corners=False),
+        )
+        
+        self.map3 = nn.Sequential(
+            nn.Conv3d(32, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(4, 4, 4), mode='trilinear', align_corners=False),
+        )
+
+        
+        self.map2 = nn.Sequential(
+            nn.Conv3d(64, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(8, 8, 8), mode='trilinear', align_corners=False),
+        )
+
+        
+        self.map1 = nn.Sequential(
+            nn.Conv3d(128, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(16, 16, 16), mode='trilinear', align_corners=False),
+           
+        )
+        
+    def forward(self,X):
+        #long_range1=16, long_range2=32, long_range3=64, long_range4=128
+        #print("longrange4: {}".format(long_range4.size()))
+       #print("before")
+        #print("long_rage1: {},long_rage2: {},long_rage3: {},long_rage4: {}".format(long_range1.size(),long_range2.size(),long_range3.size(),long_range4.size()))
+        short_range4, long_range1_notc, long_range2_notc,long_range3_notc,long_range4_notc = self.encoder(X)
+        long_range1 = self.conv_long_range1(long_range1_notc)
+        long_range2 = self.conv_long_range2(long_range2_notc)
+        long_range3 = self.conv_long_range3(long_range3_notc)
+        long_range4 = self.conv_long_range4(long_range4_notc)
+        
+        #print("long_rage1: {},long_rage2: {},long_rage3: {},long_rage4: {}".format(long_range1.size(),long_range2.size(),long_range3.size(),long_range4.size()))
+        
+        short_range4 = self.down_conv(short_range4) 
+
+    
+        outputs = self.decoder_stage1(long_range4) + short_range4 
+        decoder_feature1 = outputs
+
+        outputs = F.dropout(outputs, self.drop_rate, self.training)
+        
+        
+        output1 = self.map1(outputs) 
+       
+        short_range6 = self.up_conv2(outputs)
+     
+ 
+        outputs = self.decoder_stage2(torch.cat([short_range6, long_range3], dim=1)) + short_range6 
+        decoder_feature2 = outputs
+
+        outputs = F.dropout(outputs, self.drop_rate, self.training)
+       
+     
+        
+        output2 = self.map2(outputs) 
+        
+        
+        short_range7 = self.up_conv3(outputs)
+
+        outputs = self.decoder_stage3(torch.cat([short_range7, long_range2], dim=1)) + short_range7 #add batchnormlayer after
+
+        decoder_feature3 = outputs
+
+        outputs = F.dropout(outputs, self.drop_rate, self.training)
+
+        output3 = self.map3(outputs)
+
+        short_range8 = self.up_conv4(outputs)
+
+        outputs = self.decoder_stage4(torch.cat([short_range8, long_range1], dim=1)) + short_range8 #add batchnormlayer after
+
+        decoder_feature4 = outputs
+        
+        output4 = self.map4(outputs)
+        
+        
+        """
+        short_range6 = self.up_conv2(X)
+        #print(X.size())
+        X = self.decoder_stage2(torch.cat([short_range6,long_range4],dim=1)) + short_range6
+        X = F.dropout(X, self.drop_rate, self.training)
+        #print(X.size())
+
+        short_range7 = self.up_conv3(X)
+        #print(X.size())
+
+        X = self.decoder_stage3(short_range7) + short_range7
+        X = F.dropout(X, self.drop_rate, self.training)
+        #print(X.size())
+
+        short_range8 = self.up_conv4(X)
+        #print(X.size())
+
+        X = self.decoder_stage4(short_range8) + short_range8
+        X = self.map4(X)
+        #print(self.w.size())
+
+        """
+        
+        #w = self.w
+        #print("calibr weights: {}".format(self.w))
+        if self.training is True:
+            output4 = output1 + output2 + output3 + output4
+            #output4 = output4*w[0] + pred_G * w[1]
+            output4 = output4 + pred_G
+        else:
+            #output4 = output4*w[0] + pred_G * w[1]
+            output4 = output4 + pred_G
+            encoder_fmaps = torch.tensor([long_range1_notc.clone().detach(),long_range2_notc.clone().detach(),long_range3_notc.clone().detach(),long_range4_notc.clone().detach()])
+            decoder_fmaps = torch.tensor([decoder_feature1,decoder_feature2,decoder_feature3,decoder_feature4])
+
+
+
+        return output4,encoder_fmaps,decoder_fmaps
+        
+
+
+
+
+class ResUNet2(nn.Module):
+    def __init__(self, in_channel=1, out_channel=1 ,training=True, out_fmap = False):
+        super(ResUNet2, self).__init__()
+
+        self.training = training
+        self.out_fmap = out_fmap
+        self.drop_rate = 0.2
+
+        self.middle_conv = nn.Sequential(
+            nn.Conv3d(256,256,kernel_size=3,stride=1,padding=1),
+            nn.PReLU(256),
+            nn.BatchNorm3d(256),
+            nn.Conv3d(256,256,kernel_size=3,stride=1,padding=1),
+            nn.PReLU(256),
+            nn.BatchNorm3d(256),
+            nn.Conv3d(256,256,kernel_size=3,stride=1,padding=1),
+            nn.PReLU(256),
+            nn.BatchNorm3d(256),
+        )
+
+        self.encoder_stage1 = nn.Sequential(
+            nn.Conv3d(in_channel, 16, 3, 1, padding=1),
+            nn.PReLU(16),
+
+            nn.Conv3d(16, 16, 3, 1, padding=1),
+            nn.PReLU(16),
+        )
+
+        self.encoder_stage2 = nn.Sequential(
+            nn.Conv3d(32, 32, 3, 1, padding=1),
+            nn.PReLU(32),
+
+            nn.Conv3d(32, 32, 3, 1, padding=1),
+            nn.PReLU(32),
+
+            nn.Conv3d(32, 32, 3, 1, padding=1),
+            nn.PReLU(32),
+        )
+
+        self.encoder_stage3 = nn.Sequential(
+            nn.Conv3d(64, 64, 3, 1, padding=1),
+            nn.PReLU(64),
+
+            nn.Conv3d(64, 64, 3, 1, padding=2, dilation=2),
+            nn.PReLU(64),
+
+            nn.Conv3d(64, 64, 3, 1, padding=4, dilation=4),
+            nn.PReLU(64),
+        )
+
+        self.encoder_stage4 = nn.Sequential(
+            nn.Conv3d(128, 128, 3, 1, padding=3, dilation=3),
+            nn.PReLU(128),
+
+            nn.Conv3d(128, 128, 3, 1, padding=4, dilation=4),
+            nn.PReLU(128),
+
+            nn.Conv3d(128, 128, 3, 1, padding=5, dilation=5),
+            nn.PReLU(128),
+        )
+        self.encoder_stage5 = nn.Sequential(
+            nn.Conv3d(256, 256, 3, 1, padding=3, dilation=3),
+            nn.PReLU(256),
+
+            nn.Conv3d(256, 256, 3, 1, padding=4, dilation=4),
+            nn.PReLU(256),
+
+            nn.Conv3d(256, 256, 3, 1, padding=5, dilation=5),
+            nn.PReLU(256),
+        )
+        self.decoder_stage0 = nn.Sequential(
+            nn.Conv3d(256, 256, 3, 1, padding=1),
+            nn.PReLU(256),
+
+            nn.Conv3d(256, 256, 3, 1, padding=1),
+            nn.PReLU(256),
+
+            nn.Conv3d(256, 256, 3, 1, padding=1),
+            nn.PReLU(256),
+        )
+
+        self.decoder_stage1 = nn.Sequential(
+            nn.Conv3d(384, 256, 3, 1, padding=1),
+            nn.PReLU(256),
+
+            nn.Conv3d(256, 256, 3, 1, padding=1),
+            nn.PReLU(256),
+
+            nn.Conv3d(256, 256, 3, 1, padding=1),
+            nn.PReLU(256),
+        )
+
+        self.decoder_stage2 = nn.Sequential(
+            nn.Conv3d(128 + 64, 128, 3, 1, padding=1),
+            nn.PReLU(128),
+
+            nn.Conv3d(128, 128, 3, 1, padding=1),
+            nn.PReLU(128),
+
+            nn.Conv3d(128, 128, 3, 1, padding=1),
+            nn.PReLU(128),
+        )
+
+        self.decoder_stage3 = nn.Sequential(
+            nn.Conv3d(64 + 32, 64, 3, 1, padding=1),
+            nn.PReLU(64),
+
+            nn.Conv3d(64, 64, 3, 1, padding=1),
+            nn.PReLU(64),
+
+            nn.Conv3d(64, 64, 3, 1, padding=1),
+            nn.PReLU(64),
+        )
+
+        self.decoder_stage4 = nn.Sequential(
+            nn.Conv3d(32 + 16, 32, 3, 1, padding=1),
+            nn.PReLU(32),
+
+            nn.Conv3d(32, 32, 3, 1, padding=1),
+            nn.PReLU(32),
+        )
+
+
+        self.down_conv1 = nn.Sequential(
+            nn.Conv3d(16, 32, 2, 2),
+            nn.PReLU(32)
+        )
+
+        self.down_conv2 = nn.Sequential(
+            nn.Conv3d(32, 64, 2, 2),
+            nn.PReLU(64)
+        )
+
+        self.down_conv3 = nn.Sequential(
+            nn.Conv3d(64, 128, 2, 2),
+            nn.PReLU(128)
+        )
+
+        self.down_conv4 = nn.Sequential(
+            nn.Conv3d(128, 256, 2, 2),
+            nn.PReLU(256)
+        )
+        self.down_conv5 = nn.Sequential(
+            nn.Conv3d(256, 256, 3, 1, padding=3, dilation=3),
+            nn.PReLU(256)
+        )
+        self.up_conv1 = nn.Sequential(
+            nn.ConvTranspose3d(256, 256, 2, 2),
+            nn.PReLU(256)
+        )
+
+        self.up_conv2 = nn.Sequential(
+            nn.ConvTranspose3d(256, 128, 2, 2),
+            nn.PReLU(128)
+        )
+
+        self.up_conv3 = nn.Sequential(
+            nn.ConvTranspose3d(128, 64, 2, 2),
+            nn.PReLU(64)
+        )
+
+        self.up_conv4 = nn.Sequential(
+            nn.ConvTranspose3d(64, 32, 2, 2),
+            nn.PReLU(32)
+        )
+
+        
+        self.map4 = nn.Sequential(
+            nn.Conv3d(32, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(1, 1, 1), mode='trilinear', align_corners=False),
+            
+        )
+
+        
+        self.map3 = nn.Sequential(
+            nn.Conv3d(64, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(2, 2, 2), mode='trilinear', align_corners=False),
+            
+        )
+
+        
+        self.map2 = nn.Sequential(
+            nn.Conv3d(128, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(4, 4, 4), mode='trilinear', align_corners=False),
+
+            
+        )
+
+        
+        self.map1 = nn.Sequential(
+            nn.Conv3d(256, out_channel, 1, 1),
+            nn.Upsample(scale_factor=(8, 8, 8), mode='trilinear', align_corners=False),
+            #nn.Softmax(dim=1)
+        )
+
+        self.batch_norm1 = nn.BatchNorm3d(16)
+        self.batch_norm2 = nn.BatchNorm3d(32)
+        self.batch_norm3 = nn.BatchNorm3d(64)
+        self.batch_norm4 = nn.BatchNorm3d(128)
+        self.batch_norm5 = nn.BatchNorm3d(256)
+       
+    @property
+    def name(self):
+        return 'multiView_AutoEncoder'
+
+    def forward(self, inputs):
+
+        #print("input")
+        #print(str(inputs.size()))
+
+        long_range1 = self.encoder_stage1(inputs) + inputs
+       
+        long_range1 = self.batch_norm1(long_range1)
+
+        short_range1 = self.down_conv1(long_range1)
+
+        long_range2 = self.encoder_stage2(short_range1) + short_range1
+        
+        long_range2 = self.batch_norm2(long_range2)
+        long_range2 = F.dropout(long_range2, self.drop_rate, self.training)
+
+        short_range2 = self.down_conv2(long_range2)
+
+        long_range3 = self.encoder_stage3(short_range2) + short_range2
+      
+        long_range3 = self.batch_norm3(long_range3)
+
+        long_range3 = F.dropout(long_range3, self.drop_rate, self.training)
+
+        short_range3 = self.down_conv3(long_range3)
+
+        long_range4 = self.encoder_stage4(short_range3) + short_range3
+    
+        long_range4 = self.batch_norm4(long_range4)
+        long_range4 = F.dropout(long_range4, self.drop_rate, self.training)
+
+        short_range4 = self.down_conv4(long_range4) #128 to 256
+
+        long_range5 = self.encoder_stage5(short_range4) + short_range4
+        long_range5 = self.batch_norm5(long_range5)
+        long_range5 = F.dropout(long_range5, self.drop_rate, self.training)
+
+        short_range5 = self.down_conv5(long_range5)
+
+        long_range5 = self.middle_conv(long_range5)
+    
+        dec_fmap1 = self.decoder_stage0(long_range5) + short_range5
+        dec_fmap1 = F.dropout(dec_fmap1, self.drop_rate, self.training)
+        
+   
+        
+        short_range_middle = self.up_conv1(dec_fmap1)
+       
+    
+        dec_fmap2 = self.decoder_stage1(torch.cat([short_range_middle, long_range4], dim=1)) + short_range_middle #128 to 265
+        dec_fmap2 = F.dropout(dec_fmap2, self.drop_rate, self.training)
+        
+
+        output1 = self.map1(dec_fmap2)
+
+        short_range6 = self.up_conv2(dec_fmap2)
+
+        dec_fmap3 = self.decoder_stage2(torch.cat([short_range6, long_range3], dim=1)) + short_range6
+        dec_fmap3 = F.dropout(dec_fmap3, self.drop_rate, self.training)
+
+        output2 = self.map2(dec_fmap3)
+
+        short_range7 = self.up_conv3(dec_fmap3)
+
+        dec_fmap4 = self.decoder_stage3(torch.cat([short_range7, long_range2], dim=1)) + short_range7
+        dec_fmap4 = F.dropout(dec_fmap4, self.drop_rate, self.training)
+
+        output3 = self.map3(dec_fmap4)
+
+        short_range8 = self.up_conv4(dec_fmap4)
+
+
+        #print(short_range8.size())
+       # print(torch.sum(short_range8))
+       # print(torch.sum( self.decoder_stage4(torch.cat([short_range8, long_range1], dim=1))))
+    
+        #print(long_range1.size())
+        
+        #print(torch.cat([short_range8, long_range1], dim=1).size())
+        #print(torch.sum(torch.cat([short_range8, long_range1], dim=1)))
+        #print(torch.sum(self.decoder_stage4(torch.cat([short_range8, long_range1], dim=1))))
+        
+
+        dec_fmap5 = self.decoder_stage4(torch.cat([short_range8, long_range1], dim=1)) + short_range8
+
+        #print(torch.any(torch.isinf(dec_fmap5)))
+        
+
+        
+
+
+        output4 = self.map4(dec_fmap5)
+
+        #print("output1:")
+        #print(str(output1.size()))
+        #print("output2")
+        #print(str(output2.size()))
+        #print("output3")
+        #print(str(output3.size()))
+        #print("output4")
+        #print(str(output4.size()))
+
+        #print("output1 ={}, output2= {}, output3={}, output4={}".format(output1.size(), output2.size(), output3.size(), output4.size()))
+        #print("\n long_range1 ={}, long_range2= {}, long_range3={}, long_range4={}, long_range5={} ".format(long_range1.size(), long_range2.size(), long_range3.size(), long_range4.size(),long_range5.size()))
+        #print("\n dec_fmap1 ={}, dec_fmap2= {}, dec_fmap3={}, dec_fmap4={}, dec_fmap5={} ".format(dec_fmap1.size(), dec_fmap2.size(), dec_fmap3.size(), dec_fmap4.size(),dec_fmap5.size()))
+        
+        if self.training is True:
+            return output1, output2, output3, output4
+        else:
+            if self.out_fmap:
+                enc_fmaps = []
+                dec_fmaps = []
+                enc_fmaps.append(long_range1)
+                enc_fmaps.append(long_range2)
+                enc_fmaps.append(long_range3)
+                enc_fmaps.append(long_range4)
+                enc_fmaps.append(long_range5)
+                dec_fmaps.append(dec_fmap1)
+                dec_fmaps.append(dec_fmap2)
+                dec_fmaps.append(dec_fmap3)
+                dec_fmaps.append(dec_fmap4)
+                dec_fmaps.append(dec_fmap5)
+                return output4, enc_fmaps, dec_fmaps
+            else:
+                return output4
         
 
 

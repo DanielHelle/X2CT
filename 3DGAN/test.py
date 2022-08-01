@@ -3,7 +3,9 @@
 # Licensed under the GPLv3 License.
 # Created by Kai Ma (makai0324@gmail.com)
 # ------------------------------------------------------------------------------
-import os 
+import os
+
+from sqlalchemy import false 
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
 import argparse
@@ -18,6 +20,9 @@ import tqdm
 import torch
 import numpy as np
 from logger import Logger
+from lib.model.multiView_AutoEncoder import ResUNet2
+import torch.optim as optim
+import kornia
 
 
 
@@ -54,12 +59,68 @@ def parse_args():
                      help='if specified, only run this number of test samples for visualization')
   parse.add_argument('--resultdir', type=str, default='', dest='resultdir',
                      help='dir to save result')
+  parse.add_argument('--useConnectionModules',default="1", dest='useConnectionModules', type=str ,
+                      help='Select if you want to conv skip connections from feature_extractor to X2CT')
+  parse.add_argument('--useConstFeatureMaps',default="0", dest='useConstFeatureMaps', type=str ,
+                      help='Select if you want to you constant feature maps')
   args = parse.parse_args()
   return args
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+# map function
+def output_map(v, dim):
+    '''
+    :param v: tensor
+    :param dim:  dimension be reduced
+    :return:
+      N1HW
+    '''
+    ori_dim = v.dim()
+    # tensor [NDHW]
+    if ori_dim == 4:
+      map = torch.mean(torch.abs(v), dim=dim)
+      # [NHW] => [NCHW]
+      return map.unsqueeze(1)
+    # tensor [NCDHW] and c==1
+    elif ori_dim == 5:
+      # [NCHW]
+      map = torch.mean(torch.abs(v), dim=dim)
+      return map
+    else:
+      raise NotImplementedError()
+
+def transition(predict):
+    p_max, p_min = predict.max(), predict.min()
+    new_predict = (predict - p_min) / (p_max - p_min)
+    return new_predict
+
+def ct_unGaussian(opt, value):
+    return value * opt.CT_MEAN_STD[1] + opt.CT_MEAN_STD[0]
+
+
+def projection_visual(opt,pred):
+    # map F is projected in dimension of H
+    x_ray_fake_F = transition(output_map(ct_unGaussian(opt,pred), 2))
+    #map S is projected in dimension of W
+    x_ray_fake_S = transition(output_map(ct_unGaussian(opt,pred), 3))
+    return x_ray_fake_F, x_ray_fake_S
+
 def evaluate(args):
   # check gpu
+
+  args.useConnectionModules = str2bool(args.useConnectionModules)
+  args.useConstFeatureMaps = str2bool(args.useConstFeatureMaps)
+
   if args.gpuid == '':
     args.gpu_ids = []
   else:
@@ -141,10 +202,142 @@ def evaluate(args):
   if not os.path.exists(result_dir):
     os.makedirs(result_dir)
 
-  avg_dict = dict()
-  for epoch_i, data in tqdm.tqdm(enumerate(dataloader)):
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  template_path = os.path.abspath(os.path.join(os.path.dirname(__file__),"data", "template-data","models","template.pt"))
+  template = torch.load(template_path).to(device)
+       
+  template = torch.unsqueeze(template,dim=0)
+  template = torch.unsqueeze(template,dim=0)
+  feature_extractor_path = os.path.join(opt.MODEL_SAVE_PATH,"feature_extractor.pt")
+        
+  feature_extractor = ResUNet2(in_channel=1,out_channel=1, training=True, out_fmap = False).to(device)
+  feature_extractor.load_state_dict(torch.load(feature_extractor_path))
+  #feature_extractor2 uses recurrently finetuned weights
+  feature_extractor2 = ResUNet2(in_channel=1,out_channel=1, training=False, out_fmap = True).to(device)
+  #Probably unecessary to freeze encoder again
+  for name, param in feature_extractor.named_parameters():
+    if param.requires_grad and "down_conv" in name:
+        param.requires_grad = False
+    if param.requires_grad and "encoder_stage" in name:
+        param.requires_grad = False
+    if param.requires_grad and "batch_norm" in name:
+        param.requires_grad = False
 
-    gan_model.set_input(data)
+  feature_map_path = os.path.join(opt.MODEL_SAVE_PATH,"feature_map")
+
+  enc_fmaps = []
+  dec_fmaps = []
+  temp_efmaps = []
+  temp_dfmaps = []
+
+  if opt.useConstFeatureMaps:
+
+    for i in range(5):
+        enc_fmaps.append(torch.load(os.path.join(feature_map_path, "enc_fmap{}.pt".format(i+1))))
+        #print(enc_fmaps[len(enc_fmaps)-1].size())
+    for i in range(5):
+        dec_fmaps.append(torch.load(os.path.join(feature_map_path, "dec_fmap{}.pt".format(i+1))))
+        #print(dec_fmaps[len(dec_fmaps)-1].size())
+    temp_efmaps = copy.deepcopy(enc_fmaps)
+    temp_dfmaps = copy.deepcopy(dec_fmaps)
+
+
+  recurrences = 0
+  lr = 0.005 #May need to be lower than during pretraining
+  init_loss = 1000000
+  loss_res= 0
+  alpha = 0.4
+  gamma= 0.3
+  loss = kornia.losses.MS_SSIMLoss().to(device)
+
+  optimizer = optim.Adam(feature_extractor.parameters(),lr)
+  #scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma, verbose=True)
+  init_dict = feature_extractor.state_dict()
+
+  avg_dict = dict()
+
+  #FINETUNE ONLY WITH BATCH_SIZE = 1, we cannot update weights based on several ct scans
+  for epoch_i, data in tqdm.tqdm(enumerate(dataloader)):
+    #preform recurrent feature extraction
+    if not opt.useConstFeatureMaps:
+      loss_res = 0
+      init_loss = 1000000
+      recurrences = 0
+      feature_extractor = ResUNet2(in_channel=1,out_channel=1, training=True, out_fmap = False).to(device)
+      feature_extractor.load_state_dict(torch.load(feature_extractor_path))
+      optimizer = optim.Adam(feature_extractor.parameters(),0.005) #0.005 is lr dont want to use pointer to lr
+      scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma, verbose=True)
+      feature_extractor.train()
+      #reload weights
+      
+      while recurrences <= 100: #add or abs(init_loss - loss_res) < 0.0005 and
+        if recurrences > 0 and recurrences  % 25 == 0: 
+            print("rec: {},init_loss: {}, loss_res: {}".format(recurrences,init_loss,loss_res, abs(init_loss - loss_res)))
+        if recurrences > 50 and recurrences < 100 and recurrences % 10 == 0:
+          scheduler.step()
+        optimizer.zero_grad()
+        x_ray_S= data[1][1].to(device)
+        x_ray_F = data[1][0].to(device)
+        temp  = template.repeat(data[0].size()[0],1,1,1,1).to(device)
+        predicts = feature_extractor(temp)
+        pred1 = predicts[0]
+        pred2 = predicts[1]
+        pred3 = predicts[2]
+        pred4 = predicts[3]
+        pred1_F, pred1_S = projection_visual(opt,pred1) 
+        pred2_F, pred2_S = projection_visual(opt,pred2)  
+        pred3_F, pred3_S = projection_visual(opt,pred3) 
+        pred4_F, pred4_S = projection_visual(opt,pred4) 
+        pred1_F = pred1_F.to(device)
+        pred1_S = pred1_S.to(device)
+        pred2_F = pred2_F.to(device)
+        pred2_S = pred2_S.to(device)
+        pred3_F = pred3_F.to(device)
+        pred3_S = pred3_S.to(device)
+        pred4_F = pred4_F.to(device)
+        pred4_S = pred4_S.to(device)
+        cost1 = loss(pred1_F,x_ray_F)
+        cost2 = loss(pred1_S,x_ray_S)
+        loss1 = cost1 + cost2
+        cost1 = loss(pred2_F,x_ray_F)
+        cost2 = loss(pred2_S,x_ray_S)
+        loss2 = cost1 + cost2
+        cost1 = loss(pred3_F,x_ray_F)
+        cost2 = loss(pred3_S,x_ray_S)
+        loss3 = cost1 + cost2
+        cost1 = loss(pred4_F,x_ray_F)
+        cost2 = loss(pred4_S,x_ray_S)
+        loss4 = cost1 + cost2
+        loss_res = loss4 + (alpha *(loss1 + loss2 + loss3))
+        if recurrences == 0:
+          init_loss = loss_res
+        loss_res.backward()
+        optimizer.step()
+        recurrences = recurrences + 1
+        
+      feature_extractor2.load_state_dict(feature_extractor.state_dict())
+     
+      feature_extractor2.eval()
+      with torch.no_grad():
+        res, temp_efmaps, temp_dfmaps = feature_extractor2(template)
+    else:
+    
+      temp_efmaps[0]= enc_fmaps[0].repeat(data[0].size()[0],1,1,1,1)
+      temp_efmaps[1]= enc_fmaps[1].repeat(data[0].size()[0],1,1,1,1)
+      temp_efmaps[2]= enc_fmaps[2].repeat(data[0].size()[0],1,1,1,1)
+      temp_efmaps[3]= enc_fmaps[3].repeat(data[0].size()[0],1,1,1,1)
+      temp_efmaps[4]= enc_fmaps[4].repeat(data[0].size()[0],1,1,1,1)
+      #print(data[0].size()[0])
+      #print(enc_fmaps[len(enc_fmaps)-1].size())
+      
+      
+      temp_dfmaps[0]= dec_fmaps[0].repeat(data[0].size()[0],1,1,1,1)
+      temp_dfmaps[1]= dec_fmaps[1].repeat(data[0].size()[0],1,1,1,1)
+      temp_dfmaps[2]= dec_fmaps[2].repeat(data[0].size()[0],1,1,1,1)
+      temp_dfmaps[3]= dec_fmaps[3].repeat(data[0].size()[0],1,1,1,1)
+      temp_dfmaps[4]= dec_fmaps[4].repeat(data[0].size()[0],1,1,1,1)
+
+    gan_model.set_input(input=data,enc_fmaps=temp_efmaps,dec_fmaps=temp_dfmaps)
     gan_model.test()
 
     visuals = gan_model.get_current_visuals()

@@ -10,15 +10,21 @@ from lib.config.config import cfg_from_yaml, cfg, merge_dict_and_yaml, print_eas
 from lib.dataset.factory import get_dataset
 from lib.model.factory import get_model
 from lib.model.multiView_AutoEncoder import ResUNet
+from lib.model.multiView_AutoEncoder import ResUNet2
 from lib.model.multiView_AutoEncoder import ResUNet_Down
 from lib.model.multiView_AutoEncoder import ResUNet_up
-import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
 import copy
 import torch
 import time
 import torch.optim as optim
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import kornia
+
+#from torchsummary import summary
 
 
 def parse_args():
@@ -73,6 +79,44 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
+# map function
+def output_map(v, dim):
+    '''
+    :param v: tensor
+    :param dim:  dimension be reduced
+    :return:
+      N1HW
+    '''
+    ori_dim = v.dim()
+    # tensor [NDHW]
+    if ori_dim == 4:
+      map = torch.mean(torch.abs(v), dim=dim)
+      # [NHW] => [NCHW]
+      return map.unsqueeze(1)
+    # tensor [NCDHW] and c==1
+    elif ori_dim == 5:
+      # [NCHW]
+      map = torch.mean(torch.abs(v), dim=dim)
+      return map
+    else:
+      raise NotImplementedError()
+
+def transition(predict):
+    p_max, p_min = predict.max(), predict.min()
+    new_predict = (predict - p_min) / (p_max - p_min)
+    return new_predict
+
+def ct_unGaussian(opt, value):
+    return value * opt.CT_MEAN_STD[1] + opt.CT_MEAN_STD[0]
+
+
+def projection_visual(opt,pred):
+    # map F is projected in dimension of H
+    x_ray_fake_F = transition(output_map(ct_unGaussian(opt,pred), 2))
+    #map S is projected in dimension of W
+    x_ray_fake_S = transition(output_map(ct_unGaussian(opt,pred), 3))
+    return x_ray_fake_F, x_ray_fake_S
+
 if __name__ == '__main__':
 
     args = parse_args()
@@ -122,16 +166,18 @@ if __name__ == '__main__':
     
     
 
-    feature_map_path = os.path.join(opt.MODEL_SAVE_PATH,"feature_map")
+    
     
     #print(feature_map_path)
     
 
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    autoencoder = ResUNet(in_channel=1,out_channel=1,training=True).to(device)
+    autoencoder = ResUNet2(in_channel=1,out_channel=1,training=True).to(device)
 
-    auto_down = ResUNet_Down(in_channel = 1, out_channel=256).to(device)
+  
+
+    #auto_down = ResUNet_Down(in_channel = 1, out_channel=256).to(device)
     
     #print(autoencoder)
     #print(auto_down)
@@ -141,24 +187,24 @@ if __name__ == '__main__':
 
     # set to train
     
-
+    #for l1 loss: lr = 0.00075, alpha=0.4, batch_size=5, lr=lr=0.00075, gamma=0.6
     pretrain_auto = {}
-    pretrain_auto["lr"] = lr=0.00075
     pretrain_auto["alpha"] = 0.4
-    pretrain_auto["epoch"] = 25
+    pretrain_auto["epoch"] =150
     #first batch size was 30
     pretrain_auto["batch-print"] = 35
     pretrain_auto["batch_size"] = 5
-    pretrain_auto["loss"] = torch.nn.L1Loss().to(device)
+    #pretrain_auto["loss"] = torch.nn.L1Loss().to(device)
+    pretrain_auto["loss"] = torch.nn.MSELoss(reduction='mean')
     #Gamma for next three items are 0.9
     #0.0001 err 0.0744 epoch 0 batch 30
     #0.00001 err 0.06 ep 0 batch 30 0.05-0.07
     #lr = 0.0005 batch 35 err 0.043-0.05
 
     #  for batch size 1, lr=0.00005
-    pretrain_auto["optimizer"] = optim.Adam(autoencoder.parameters(),lr=0.00075)
+    pretrain_auto["optimizer"] = optim.Adam(autoencoder.parameters(),lr=0.000075)
 
-    pretrain_auto["scheduler"] = optim.lr_scheduler.ExponentialLR(pretrain_auto["optimizer"],gamma=0.6, verbose=True)
+    pretrain_auto["scheduler"] = optim.lr_scheduler.ExponentialLR(pretrain_auto["optimizer"],gamma=0.5, verbose=True)
     #pretrain_auto["scheduler"] = optim.lr_scheduler.LamdaLR(pretrain_auto["optimizer"],batch_learn)
     if opt.pretrain == True:
         print(autoencoder)
@@ -174,6 +220,7 @@ if __name__ == '__main__':
     avg_losses = []
     lr_list = []
     predicts = None
+
    
     template = None
     pretrain_auto["running_loss"] = 0.0
@@ -186,8 +233,6 @@ if __name__ == '__main__':
             correct = 0
             for i, data in enumerate(dataloader_auto):
                 X = data[0]
-                if template == None:
-                    template = data[3][0]
                     
                 X = torch.unsqueeze(X,1)
                     
@@ -207,44 +252,47 @@ if __name__ == '__main__':
                 pretrain_auto["optimizer"].step()
                 pretrain_auto["running_loss"] = pretrain_auto["running_loss"] + loss.item()
                 if i % pretrain_auto["batch-print"] == 0:
-                    print("\n Epoch: {}, Loss: {}, Batch {}\n ".format(epoch, loss.item(),i))
+                    print("\n Epoch: {}, Loss: {}, sample {}\n ".format(epoch, loss.item(),i*pretrain_auto['batch_size']))
+
             curr_lr = pretrain_auto["scheduler"].optimizer.param_groups[0]['lr']
-            pretrain_auto["scheduler"].step()
+            if epoch % 50 == 0 and epoch > 0 and epoch < pretrain_auto["epoch"]:
+                pretrain_auto["scheduler"].step()
             avg_loss = pretrain_auto["running_loss"]/len(dataloader_auto)
             avg_losses.append(avg_loss)
             lr_list.append(curr_lr)
 
             
 
-
+ 
         
 
         
         
-        template = template.to(device)
+        #template = template.to(device)
 
-        template = torch.unsqueeze(template,dim=0)
-        template = torch.unsqueeze(template,dim=0)
-        keys = set(auto_down.state_dict().keys())
-        auto_down.load_state_dict({k:v for k,v in autoencoder.state_dict().items() if k in keys})
-        print(auto_down)
-        feature_map,long_range1, long_range2, long_range3, long_range4 = auto_down(template)
-        dim = feature_map.size()[2] 
+        #template = torch.unsqueeze(template,dim=0)
+        #template = torch.unsqueeze(template,dim=0)
+        #keys = set(auto_down.state_dict().keys())
+        #auto_down.load_state_dict({k:v for k,v in autoencoder.state_dict().items() if k in keys})
+        #print(auto_down)
+        #feature_map,long_range1, long_range2, long_range3, long_range4 = auto_down(template)
+        #dim = feature_map.size()[2] 
         #print(feature_map.size())
         #print(dim)
-        file_path = os.path.join(feature_map_path,"feature_map.pt")
-        long_range1_path = os.path.join(feature_map_path,"long_range1.pt")
-        long_range2_path = os.path.join(feature_map_path,"long_range2.pt")
-        long_range3_path = os.path.join(feature_map_path,"long_range3.pt")
-        long_range4_path = os.path.join(feature_map_path,"long_range4.pt")
+        #file_path = os.path.join(feature_map_path,"feature_map.pt")
+        #long_range1_path = os.path.join(feature_map_path,"long_range1.pt")
+        ##long_range2_path = os.path.join(feature_map_path,"long_range2.pt")
+        #long_range3_path = os.path.join(feature_map_path,"long_range3.pt")
+        #long_range4_path = os.path.join(feature_map_path,"long_range4.pt")
+
         autoencoder_figs_path = os.path.join(opt.MODEL_SAVE_PATH,"figs","autoencoder","train")
         avg_loss_path = os.path.join(autoencoder_figs_path,"avg-loss.png")
         lr_path = os.path.join(autoencoder_figs_path,"lr.png")
         
         
         autoencoder_path = os.path.join(opt.MODEL_SAVE_PATH,"autoencoder.pt")
-        auto_down_path = os.path.join(opt.MODEL_SAVE_PATH,"auto_down.pt")
-
+        #auto_down_path = os.path.join(opt.MODEL_SAVE_PATH,"auto_down.pt")
+        """
         if os.path.isfile(file_path):
             os.remove(file_path)
         if os.path.isfile(long_range1_path):
@@ -255,27 +303,29 @@ if __name__ == '__main__':
             os.remove(long_range3_path)
         if os.path.isfile(long_range4_path):
             os.remove(long_range4_path)
+
+        """
         if os.path.isfile(avg_loss_path):
             os.remove(avg_loss_path)
         if os.path.isfile(lr_path):
             os.remove(lr_path)
         if os.path.isfile(autoencoder_path):
             os.remove(autoencoder_path)
-        if os.path.isfile(auto_down_path):
-            os.remove(auto_down_path)
+        #if os.path.isfile(auto_down_path):
+            #os.remove(auto_down_path)
         
 
         
 
         
 
-        torch.save(feature_map,file_path)
-        torch.save(long_range1,long_range1_path)
-        torch.save(long_range2,long_range2_path)
-        torch.save(long_range3,long_range3_path)
-        torch.save(long_range4,long_range4_path)
+        #torch.save(feature_map,file_path)
+        #torch.save(long_range1,long_range1_path)
+        #torch.save(long_range2,long_range2_path)
+        #torch.save(long_range3,long_range3_path)
+        #torch.save(long_range4,long_range4_path)
         torch.save(autoencoder.state_dict(),autoencoder_path)
-        torch.save(auto_down.state_dict(),auto_down_path)
+        #torch.save(auto_down.state_dict(),auto_down_path)
 
         fg_loss = Figure()
         ax_loss = fg_loss.gca()
@@ -285,7 +335,7 @@ if __name__ == '__main__':
         ax_loss.set_ylabel('avg-loss', fontsize='medium')
         
         fg_loss.savefig(avg_loss_path)
-
+        
         fg_lr = Figure()
         ax_lr = fg_lr.gca()
         ax_lr.plot(lr_list)
@@ -294,17 +344,15 @@ if __name__ == '__main__':
         ax_lr.set_ylabel('lr', fontsize='medium')
         
         fg_lr.savefig(lr_path)
-
+        
         exit()
     else:
         
         #create Template
-
-        
-        auto_down_path = os.path.join(opt.MODEL_SAVE_PATH,"auto_down.pt")
-        auto_down = ResUNet_Down(in_channel = 1, out_channel=256).to(device)
-        auto_down_weights = torch.load(auto_down_path)
-        auto_down.load_state_dict(auto_down_weights)
+        #auto_down_path = os.path.join(opt.MODEL_SAVE_PATH,"auto_down.pt")
+        #auto_down = ResUNet_Down(in_channel = 1, out_channel=256).to(device)
+        #auto_down_weights = torch.load(auto_down_path)
+        #auto_down.load_state_dict(auto_down_weights)
 
         #feature_map = torch.load(feature_map_path +"\\feature_map.pt")
         #long_range1 = torch.load(feature_map_path +"\\long_range1.pt")
@@ -312,13 +360,40 @@ if __name__ == '__main__':
         #long_range3 = torch.load(feature_map_path +"\\long_range3.pt")
         #long_range4 = torch.load(feature_map_path +"\\long_range4.pt")
         #w = torch.tensor([0.5,0.5],requires_grad=False).to(device)
-        auto_up = ResUNet_up(in_channel=1,out_channel=1, training=True, pretrained = auto_down).to(device)
+        autoencoder_path = os.path.join(opt.MODEL_SAVE_PATH,"autoencoder.pt")
+        feature_extractor = ResUNet2(in_channel=1,out_channel=1, training=True).to(device)
+        feature_extractor.load_state_dict(torch.load(autoencoder_path))
+        #Freezes encoder weights
+        
+
+        for name, param in feature_extractor.named_parameters():
+            if param.requires_grad and "down_conv" in name:
+                param.requires_grad = False
+            if param.requires_grad and "encoder_stage" in name:
+                param.requires_grad = False
+            if param.requires_grad and "batch_norm" in name:
+                param.requires_grad = False
+
+        #for name, param in feature_extractor.named_parameters():
+        #    if param.requires_grad:print(name)
+
+       
+        
+        template_path = os.path.abspath(os.path.join(os.path.dirname(__file__),"data", "template-data","models","template.pt"))
+        template = torch.load(template_path).to(device)
+       
+        template = torch.unsqueeze(template,dim=0)
+        template = torch.unsqueeze(template,dim=0)
+        #print(template.size())
+        
+
        
             
-        print(auto_up)
+        print(feature_extractor)
         
             #Load pretrained X2CT model
             #define and learn weights between X2CT and ResNet outputs
+        """
         gan_model = get_model(opt.model_class)()
         print('Model --{}-- will be Used'.format(gan_model.name))
 
@@ -357,23 +432,24 @@ if __name__ == '__main__':
         if not os.path.exists(result_dir):
             os.makedirs(result_dir)
         
-
+        """
         avg_dict = dict()
-    
-        epochs = 1
-        batch_size = 5
-        lr = 0.00015
+        epochs = 210
+        batch_size =6
+        lr = 0.005
         gamma = 0.4
+        alpha = 0.4
         running_loss = 0.0
         curr_lr = 0.0
         avg_losses = []
         lr_list = []
-        encoder_fmap = torch.empty()
-        decoder_fmap = torch.empty()
+        batch_print = 35
         
-        loss = torch.nn.L1Loss().to(device)
-        optimizer = optim.Adam(auto_up.parameters(),lr)
-
+        
+        
+        #loss = torch.nn.L1Loss().to(device)
+        loss = kornia.losses.MS_SSIMLoss().to(device)
+        optimizer = optim.Adam(feature_extractor.parameters(),lr)
         scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma, verbose=True)
         
         dataloader_decoder = torch.utils.data.DataLoader(
@@ -383,71 +459,229 @@ if __name__ == '__main__':
         num_workers=int(opt.nThreads),
         collate_fn=collateClass)
 
+        #VALIDATION DATA
+        valid_feature_extractor = True
+        opt_valid = copy.deepcopy(opt)
+        opt_valid.dataset = "test"
+        opt_valid.datasetfile="./data/test.txt"
+        batch_size_valid = 6
+        valid_running_loss = 0.0
+        valid_avg_loss = 0.0
+        valid_avg_losses = []
 
-        #Train decodeCorrection
-    
+        datasetClassValid, _, dataTestClassValid, collateClassValid = get_dataset(opt_valid.dataset_class)
+        opt_valid.data_augmentation = dataTestClassValid
+        dataset_valid = datasetClassValid(opt_valid)
 
+        dataloader_valid = torch.utils.data.DataLoader(
+            dataset_valid,
+            batch_size= batch_size_valid,
+            shuffle=True,
+            num_workers=int(opt_valid.nThreads),
+        collate_fn=collateClassValid)
+        #print(dataloader_decoder.__len__())
+        #print(dataloader_valid.__len__())
+        
+        feature_extractor.train()
+        #feature_extractor.train()
+        
+
+        #Takes x-rays as input and calculates loss based on the l1 diff between projected prediction and x-rays
+        #x_ray 1 is from side and x_ray2 is from front
         for epoch in range(epochs):
             running_loss = 0.0
-            for i,data in enumerate(dataloader_decoder):
+            counter = 0
+
+            for i,data in enumerate(dataloader_decoder):   
                 
-                gan_model.set_input(data)
-                gan_model.test()
-                visuals = gan_model.get_current_visuals()
-                img_path = gan_model.get_image_paths()
-                pred_G = gan_model.get_prediction()
-                #template =
-                pred_res, encoder_fmap, decoder_fmap= auto_up(template)
-                gt= gan_model.get_real()
-                pred_res = torch.squeeze(pred_res,dim=0)
+                
+                x_ray_S= data[1][1].to(device) #x_ray_1
+                x_ray_F = data[1][0].to(device) # x_ray_2
+
                 optimizer.zero_grad()
-                print("gt: {}".format(gt.size()))
-                print("pred {}".format(pred_res.size()))
-                cost = loss(gt,pred_res)
-                cost.backward()
+
+                #print(template.size())
+                temp = template.repeat(data[0].size()[0],1,1,1,1)
+
+                predicts = feature_extractor(temp)
+               
+                pred1 = predicts[0]
+                pred2 = predicts[1]
+                pred3 = predicts[2]
+                pred4 = predicts[3]
+
+                #need to see if variable batch size works for projections i.e. [X, 1, 128, 128] 
+                #F stands for Front and S stands for Side
+                pred1_F, pred1_S = projection_visual(opt,pred1) #Size [1, 1, 128, 128] 
+                pred2_F, pred2_S = projection_visual(opt,pred2) #Size [1, 1, 128, 128] 
+                pred3_F, pred3_S = projection_visual(opt,pred3) #Size [1, 1, 128, 128] 
+                pred4_F, pred4_S = projection_visual(opt,pred4) #Size [1, 1, 128, 128] 
+                pred1_F = pred1_F.to(device)
+                pred1_S = pred1_S.to(device)
+                pred2_F = pred2_F.to(device)
+                pred2_S = pred2_S.to(device)
+                pred3_F = pred3_F.to(device)
+                pred3_S = pred3_S.to(device)
+                pred4_F = pred4_F.to(device)
+                pred4_S = pred4_S.to(device)
+                
+                cost1 = loss(pred1_F,x_ray_F)
+                cost2 = loss(pred1_S,x_ray_S)
+                loss1 = cost1 + cost2
+
+                cost1 = loss(pred2_F,x_ray_F)
+                cost2 = loss(pred2_S,x_ray_S)
+                loss2 = cost1 + cost2
+
+                cost1 = loss(pred3_F,x_ray_F)
+                cost2 = loss(pred3_S,x_ray_S)
+                loss3 = cost1 + cost2
+
+                cost1 = loss(pred4_F,x_ray_F)
+                cost2 = loss(pred4_S,x_ray_S)
+                loss4 = cost1 + cost2
+                
+                loss_res = loss4 + (alpha *(loss1 + loss2 + loss3))
+
+                loss_res.backward()
                 optimizer.step()
-                #print("W: {}".format(auto_up.w))
-                print("\n Epoch: {}, Loss: {}, Batch {}\n ".format(epoch, cost.item(),i))
+                if i % batch_print == 0:
+                    print("\n Epoch: {}, Loss: {}, sample {}\n ".format(epoch, loss_res.item(),i*batch_size))
+                running_loss = running_loss + loss_res.item()
+                
+                
             curr_lr = scheduler.optimizer.param_groups[0]['lr']
-            scheduler.step()
+            if epoch % 35 == 0 and epoch > 0 and epoch < epochs:
+                scheduler.step()
             avg_loss = running_loss/len(dataloader_auto)
             avg_losses.append(avg_loss)
             lr_list.append(curr_lr)
 
-        feature_map_path = os.path.join(opt.MODEL_SAVE_PATH,"feature_map")
-        auto_up_path = os.path.join(opt.MODEL_SAVE_PATH,"auto_down.pt")
-        encoder_fmap_path = os.path.join(feature_map_path,"encoder_fmap.pt")
-        decoder_fmap_path = os.path.join(feature_map_path,"decoder_fmap.pt")
-
-
-        if os.path.isfile(auto_up_path):
-            os.remove(auto_up_path)
-        if os.path.isfile(encoder_fmap_path):
-            os.remove(encoder_fmap_path)
-        if os.path.isfile(decoder_fmap_path):
-            os.remove(decoder_fmap_path)
+            if valid_feature_extractor:
+                valid_running_loss = 0.0
+                counter2 = 0
+                with torch.no_grad():
+                    for i_v, data_v in enumerate(dataloader_valid):
+                        x_ray_S= data_v[1][1].to(device)
+                        x_ray_F = data_v[1][0].to(device)
+                        temp  = template.repeat(data_v[0].size()[0],1,1,1,1)
+                        predicts = feature_extractor(temp)
+                        pred1 = predicts[0]
+                        pred2 = predicts[1]
+                        pred3 = predicts[2]
+                        pred4 = predicts[3]
+                        pred1_F, pred1_S = projection_visual(opt,pred1) 
+                        pred2_F, pred2_S = projection_visual(opt,pred2)  
+                        pred3_F, pred3_S = projection_visual(opt,pred3) 
+                        pred4_F, pred4_S = projection_visual(opt,pred4) 
+                        pred1_F = pred1_F.to(device)
+                        pred1_S = pred1_S.to(device)
+                        pred2_F = pred2_F.to(device)
+                        pred2_S = pred2_S.to(device)
+                        pred3_F = pred3_F.to(device)
+                        pred3_S = pred3_S.to(device)
+                        pred4_F = pred4_F.to(device)
+                        pred4_S = pred4_S.to(device)
+                        #print(pred1_F.size())
+                        #print(x_ray_F.size())
+                        cost1 = loss(pred1_F,x_ray_F)
+                        cost2 = loss(pred1_S,x_ray_S)
+                        loss1 = cost1 + cost2
+                        cost1 = loss(pred2_F,x_ray_F)
+                        cost2 = loss(pred2_S,x_ray_S)
+                        loss2 = cost1 + cost2
+                        cost1 = loss(pred3_F,x_ray_F)
+                        cost2 = loss(pred3_S,x_ray_S)
+                        loss3 = cost1 + cost2
+                        cost1 = loss(pred4_F,x_ray_F)
+                        cost2 = loss(pred4_S,x_ray_S)
+                        loss4 = cost1 + cost2
+                        loss_res = loss4 + (alpha *(loss1 + loss2 + loss3))
+                        valid_running_loss = valid_running_loss + loss_res.item()
+                    valid_avg_loss = valid_running_loss/len(dataloader_valid)
+                    valid_avg_losses.append(valid_avg_loss)
+            if epoch % 2 == 0:
+                torch.save(feature_extractor.state_dict(), os.path.join(opt.MODEL_SAVE_PATH,"saved_states","feature_extractor{}.pt".format(epoch)))
+            print("\n valid-loss: {} \n".format(valid_avg_losses[len(valid_avg_losses)-1]))
 
         
-        torch.save(auto_up.state_dict(),auto_up_path)
-        torch.save(encoder_fmap,encoder_fmap_path)
-        torch.save(decoder_fmap,decoder_fmap_path)
+        feature_extractor_path = os.path.join(opt.MODEL_SAVE_PATH,"feature_extractor.pt")
+        feature_extractor_figs_path = os.path.join(opt.MODEL_SAVE_PATH,"figs","feature_extractor","train")
+        feature_map_path = os.path.join(opt.MODEL_SAVE_PATH,"feature_map")
+        
 
-        #save encoder_fmap and decoder_fmap on disk
-
-
-            
-
-           
+        avg_loss_path = os.path.join(feature_extractor_figs_path,"avg-loss.png")
+        avg_loss_valid_path = os.path.join(feature_extractor_figs_path,"avg-valid-loss.png")
+        lr_path = os.path.join(feature_extractor_figs_path,"lr.png")
 
 
+        if os.path.isfile(avg_loss_path):
+            os.remove(avg_loss_path)
+        if os.path.isfile(feature_extractor_path):
+            os.remove(feature_extractor_path)
+        if os.path.isfile(lr_path):
+            os.remove(lr_path)
+        for f in os.listdir(feature_map_path):
+            os.remove(os.path.join(feature_map_path, f))
+
+        for f in os.listdir(feature_extractor_figs_path):
+            os.remove(os.path.join(feature_extractor_figs_path, f))
+
+        torch.save(feature_extractor.state_dict(),feature_extractor_path)
+
+     
+        fg_loss = Figure()
+        ax_loss = fg_loss.gca()
+        ax_loss.plot(avg_losses)
+        ax_loss.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax_loss.set_xlabel('epochs', fontsize=10)
+        ax_loss.set_ylabel('avg-loss', fontsize='medium')
+        
+        fg_loss.savefig(avg_loss_path)
+
+        fg_lr = Figure()
+        ax_lr = fg_lr.gca()
+        ax_lr.plot(lr_list)
+        ax_lr.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax_lr.set_xlabel('epochs', fontsize=10)
+        ax_lr.set_ylabel('lr', fontsize='medium')
+        
+        fg_lr.savefig(lr_path)
+
+        if valid_feature_extractor:
+            fg_loss = Figure()
+            ax_loss = fg_loss.gca()
+            ax_loss.plot(valid_avg_losses)
+            ax_loss.xaxis.set_major_locator(MaxNLocator(integer=True))
+            ax_loss.set_xlabel('epochs', fontsize=10)
+            ax_loss.set_ylabel('avg-valid-loss', fontsize='medium')
+        
+            fg_loss.savefig(avg_loss_valid_path)
 
 
 
+        #if os.path.isfile(enc_fmaps_path):
+            #os.remove(enc_fmaps_path)
+        #if os.path.isfile(dec_fmaps_path):
+            #os.remove(dec_fmaps_path)
+        #for f in os.listdir(feature_map_path):
+            #os.remove(os.path.join(feature_map_path, f))
+        #torch.load(decoder_fmap,os.path.join(feature_map_path,"dec_fmaps.pt"))
+        #torch.load(decoder_fmap,os.path.join(feature_map_path,"enc_fmaps.pt"))
+        
 
+        #Saves enc_fmaps and dec_fmaps
+        feature_extractor2 = feature_extractor = ResUNet2(in_channel=1,out_channel=1, training=False, out_fmap = True).to(device)
+        feature_extractor2.load_state_dict(torch.load(feature_extractor_path))
+        with torch.no_grad():
+            pred, enc_fmaps, dec_fmaps = feature_extractor2(template)
 
+        for i in range(5):
+            torch.save(enc_fmaps[i],os.path.join(feature_map_path, "enc_fmap{}.pt".format(i+1)))
+        for i in range(5):
+            torch.save(dec_fmaps[i],os.path.join(feature_map_path, "dec_fmap{}.pt".format(i+1)))
+        
       
-
-
 
 
 

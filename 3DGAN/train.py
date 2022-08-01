@@ -3,32 +3,22 @@
 # Licensed under the GPLv3 License.
 # Created by Kai Ma (makai0324@gmail.com)
 # ------------------------------------------------------------------------------
-import os
-from sre_constants import JUMP
-
-from tabnanny import verbose 
+import os 
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 import argparse
 from lib.config.config import cfg_from_yaml, cfg, merge_dict_and_yaml, print_easy_dict
 from lib.dataset.factory import get_dataset
 from lib.model.factory import get_model
-from lib.model.multiView_AutoEncoder import ResUNet
-from lib.model.multiView_AutoEncoder import ResUNet_Down
-from lib.model.multiView_AutoEncoder import ResUNet_up
 import copy
 import torch
 import time
+import kornia
 import torch.optim as optim
-from tqdm import tqdm
-#from logger import Logger
-#import sys
+from lib.model.multiView_AutoEncoder import ResUNet2
+import kornia.enhance.normalize as normalize
+import torch.nn.functional as F
 
-"""
-def batch_learn(batch):
 
-  return 
-
-"""
 
 def parse_args():
   parse = argparse.ArgumentParser(description='CTGAN')
@@ -62,14 +52,66 @@ def parse_args():
                      help='set to latest to use latest cached model')
   parse.add_argument('--verbose', action='store_true', dest='verbose',
                      help='if specified, print more debugging information')
+  parse.add_argument('--useConnectionModules',default="1", dest='useConnectionModules', type=str ,
+                        help='Select if you want to conv skip connections from feature_extractor to X2CT')
+  parse.add_argument('--useConstFeatureMaps',default="0", dest='useConstFeatureMaps', type=str ,
+                      help='Select if you want to you constant feature maps')
   args = parse.parse_args()
   return args
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+def output_map(v, dim):
+    '''
+    :param v: tensor
+    :param dim:  dimension be reduced
+    :return:
+      N1HW
+    '''
+    ori_dim = v.dim()
+    # tensor [NDHW]
+    if ori_dim == 4:
+      map = torch.mean(torch.abs(v), dim=dim)
+      # [NHW] => [NCHW]
+      return map.unsqueeze(1)
+    # tensor [NCDHW] and c==1
+    elif ori_dim == 5:
+      # [NCHW]
+      map = torch.mean(torch.abs(v), dim=dim)
+      return map
+    else:
+      raise NotImplementedError()
+
+def transition(predict):
+    p_max, p_min = predict.max(), predict.min()
+    new_predict = (predict - p_min) / (p_max - p_min)
+    return new_predict
+
+def ct_unGaussian(opt, value):
+    return value * opt.CT_MEAN_STD[1] + opt.CT_MEAN_STD[0]
+
+
+def projection_visual(opt,pred):
+    # map F is projected in dimension of H
+    x_ray_fake_F = transition(output_map(ct_unGaussian(opt,pred), 2))
+    #map S is projected in dimension of W
+    x_ray_fake_S = transition(output_map(ct_unGaussian(opt,pred), 3))
+    return x_ray_fake_F, x_ray_fake_S
+
+
 if __name__ == '__main__':
-  
-
-
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   args = parse_args()
+  args.useConnectionModules = str2bool(args.useConnectionModules)
+  args.useConstFeatureMaps = str2bool(args.useConstFeatureMaps)
 
   # check gpu
   if args.gpuid == '':
@@ -96,8 +138,6 @@ if __name__ == '__main__':
   opt = merge_dict_and_yaml(args.__dict__, opt)
   print_easy_dict(opt)
 
-  #torch.cuda.empty_cache()
-
   # add data_augmentation
   datasetClass, augmentationClass, dataTestClass, collateClass = get_dataset(opt.dataset_class)
   opt.data_augmentation = augmentationClass
@@ -106,7 +146,6 @@ if __name__ == '__main__':
   if args.valid_dataset is not None:
     valid_opt = copy.deepcopy(opt)
     valid_opt.data_augmentation = dataTestClass
-   
     valid_opt.datasetfile = opt.valid_datasetfile
 
 
@@ -124,134 +163,27 @@ if __name__ == '__main__':
     valid_dataloader = None
 
   # get dataset
-
+  batch_size = 2
   dataset = datasetClass(opt)
   print('DataSet is {}'.format(dataset.name))
   dataloader = torch.utils.data.DataLoader(
     dataset,
-    batch_size=opt.batch_size,
+    batch_size=batch_size,#opt.batch_size
     shuffle=True,
     num_workers=int(opt.nThreads),
     collate_fn=collateClass)
-
 
   dataset_size = len(dataloader)
   print('#training images = %d' % dataset_size)
-
-  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-  autoencoder = ResUNet(in_channel=1,out_channel=1,training=True).to(device)
-  auto_down = ResUNet_Down(in_channel = 1, out_channel=256).to(device)
-  
-  #print(autoencoder)
-  #print(auto_down)
-  
-
-  autoencoder.train()
-
-  # set to train
- 
-
-  pretrain_auto = {}
-  pretrain_auto["alpha"] = 0.4
-  pretrain_auto["epoch"] = 3
-  #first batch size was 30
-  pretrain_auto["batch"] = 35
-  pretrain_auto["loss"] = torch.nn.L1Loss().to(device)
-  #Gamma for next three items are 0.9
-  #0.0001 err 0.0744 epoch 0 batch 30
-  #0.00001 err 0.06 ep 0 batch 30 0.05-0.07
-  #lr = 0.0005 batch 35 err 0.043-0.05
-  #  
-  pretrain_auto["optimizer"] = optim.Adam(autoencoder.parameters(),lr=0.00005)
-
-  pretrain_auto["scheduler"] = optim.lr_scheduler.ExponentialLR(pretrain_auto["optimizer"],gamma=0.4, verbose=True)
-  #pretrain_auto["scheduler"] = optim.lr_scheduler.LamdaLR(pretrain_auto["optimizer"],batch_learn)
-
-
-
-  dataloader_auto = torch.utils.data.DataLoader(
-    dataset,
-    batch_size= 1,
-    shuffle=True,
-    num_workers=int(opt.nThreads),
-    collate_fn=collateClass)
-
-  predicts = None
-  #remove below line when not debugging
-  pretrain_auto["epoch"] = 3
-  template = None
-  
-  
-  #pretraining of autoencoder
-  for epoch in range(pretrain_auto["epoch"]):
-      correct = 0
-      for i, data in enumerate(dataloader_auto):
-        X = data[0]
-        if template == None:
-          template = data[3][0]
-        #print(X)
-        X = torch.unsqueeze(X,1)
-        #print("fieeeeeem" + str(torch.sum(X)))
-        X = X.to(device)
-
-        pretrain_auto["optimizer"].zero_grad()
-        
-        predicts = autoencoder(X)
-
-        loss0 = pretrain_auto["loss"](predicts[0],X)
-        loss1 = pretrain_auto["loss"](predicts[1],X)
-        loss2 = pretrain_auto["loss"](predicts[2],X)
-        loss3 = pretrain_auto["loss"](predicts[3],X)
-        #print("\n loss0: {}, loss1: {}, loss2: {}, loss3: {} \n".format(loss0.item(),loss1.item(),loss2.item(),loss3.item()))
-        loss = loss3 + pretrain_auto["alpha"] *(loss0 + loss1 + loss2)
-        loss.backward()
-        pretrain_auto["optimizer"].step()
-        if i % pretrain_auto["batch"] == 0:
-          print("\n Epoch: {}, Loss: {}, Batch {}\n ".format(epoch, loss.item(),i))
-          break
-      pretrain_auto["scheduler"].step()
-
-
-  
-  template = template.to(device)
-
-  template = torch.unsqueeze(template,dim=0)
-  template = torch.unsqueeze(template,dim=0)
-  keys = set(auto_down.state_dict().keys())
-  auto_down.load_state_dict({k:v for k,v in autoencoder.state_dict().items() if k in keys})
-  feature_map = auto_down(template)
-  dim = feature_map.size()[2]
-  #print(feature_map.size())
-  #print(dim)
-  
-  auto_up = ResUNet_up(in_channel=256,out_channel=1,dim= dim).to(device)
-
-  output = auto_up(feature_map)
-
-
-
-
-
-  
-  #print(feature_map)
-  #print("SUM of feature map: {}".format(torch.sum(feature_map)))
-  #exit() HERE
-
-  
-  
- 
 
   # get model
   gan_model = get_model(opt.model_class)()
   print('Model --{}-- will be Used'.format(gan_model.name))
   gan_model.init_process(opt)
   total_steps, epoch_count = gan_model.setup(opt)
+
+  # set to train
   gan_model.train()
-
-
-  
-
-
 
   # visualizer
   from lib.utils.visualizer import Visualizer
@@ -261,23 +193,203 @@ if __name__ == '__main__':
 
   # train discriminator more
   dataloader_iter_for_discriminator = iter(dataloader)
+  feature_map_path = os.path.join(opt.MODEL_SAVE_PATH,"feature_map")
 
+  template_path = os.path.abspath(os.path.join(os.path.dirname(__file__),"data", "template-data","models","template.pt"))
+  template = torch.load(template_path).to(device)
+       
+  template = torch.unsqueeze(template,dim=0)
+  template = torch.unsqueeze(template,dim=0)
 
-  #we need to add inout to optimize_paramets with output of autoencoder 
-  # OLD train NOW finetune 
+  enc_fmaps = []
+  dec_fmaps = []
+  temp_efmaps = []
+  temp_dfmaps = []
+  print("opt.useConstFeatureMaps")
+  print(opt.useConstFeatureMaps)
+  if opt.useConstFeatureMaps:
+  
+    for i in range(5):
+        enc_fmaps.append(torch.load(os.path.join(feature_map_path, "enc_fmap{}.pt".format(i+1))))
+        #print(enc_fmaps[len(enc_fmaps)-1].size())
+    for i in range(5):
+        dec_fmaps.append(torch.load(os.path.join(feature_map_path, "dec_fmap{}.pt".format(i+1))))
+        #print(dec_fmaps[len(dec_fmaps)-1].size())
+    temp_efmaps = copy.deepcopy(enc_fmaps)
+    temp_dfmaps = copy.deepcopy(dec_fmaps)
+
+  
+  recurrences = 0
+  #0.0005  conv to 122
+  lr = 0.005 #May need to be lower than during pretraining 
+  init_loss = 1000000
+  loss_res= 0
+  alpha = 0.5
+  gamma = 0.3
+  loss = kornia.losses.MS_SSIMLoss().to(device)
+  feature_extractor_path = os.path.join(opt.MODEL_SAVE_PATH,"feature_extractor.pt")
+
+  feature_extractor = ResUNet2(in_channel=1,out_channel=1, training=True, out_fmap = False).to(device)
+  
+  
+
+  feature_extractor.load_state_dict(torch.load(feature_extractor_path))
+  for name, param in feature_extractor.named_parameters():
+    if param.requires_grad and "down_conv" in name:
+        param.requires_grad = False
+    if param.requires_grad and "encoder_stage" in name:
+        param.requires_grad = False
+    if param.requires_grad and "batch_norm" in name:
+        param.requires_grad = False
+
+  feature_extractor2 =ResUNet2(in_channel=1,out_channel=1, training=False, out_fmap = True).to(device)
+  feature_extractor2.load_state_dict(feature_extractor.state_dict())
+
+  feature_extractor.train()
+
+  valid_GAN = True
+ 
+  
+
+  optimizer = optim.Adam(feature_extractor.parameters(),lr)
+  #scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma, verbose=True)
+  init_dict = feature_extractor.state_dict()
+
+  
+  
+  # train
   for epoch in range(opt.epoch_count, opt.niter + opt.niter_decay + 1):
     epoch_start_time = time.time()
     iter_data_time = time.time()
 
+      
+
+
+
     for epoch_i, data in enumerate(dataloader):
+      
+     
+      if not opt.useConstFeatureMaps:
+         for b_i in range(data[0].size()[0]):
+
+
+
+          loss_res = 0
+          init_loss = 1000000
+          feature_extractor = ResUNet2(in_channel=1,out_channel=1, training=True, out_fmap = False).to(device)
+          feature_extractor.load_state_dict(torch.load(feature_extractor_path))
+          optimizer = optim.Adam(feature_extractor.parameters(),0.005) #0.005 is lr
+          #scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma, verbose=True)
+          recurrences = 0
+          feature_extractor.train()
+
+          while recurrences <= 13: #25 recurrences
+          # if  (abs(init_loss - loss_res)<= 1.2 and recurrences >= 7) or (loss_res > init_loss and (abs(init_loss - loss_res) >= 1.2) and recurrences >=6)  :
+            #  break
+            if recurrences > 0 and recurrences % 6 == 0:
+              print("rec: {},init_loss: {}, loss_res: {}".format(recurrences,init_loss,loss_res, abs(init_loss - loss_res)))
+            optimizer.zero_grad()
+            x_ray_S= torch.unsqueeze(data[1][1][b_i],dim=0).to(device)
+           
+            
+            x_ray_F = torch.unsqueeze(data[1][0][b_i],dim=0).to(device)
+            
+            #temp  = template.repeat(data[0].size()[0],1,1,1,1).to(device)
+          
+            predicts = feature_extractor(template)
+            pred1 = predicts[0]
+            pred2 = predicts[1]
+            pred3 = predicts[2]
+            pred4 = predicts[3]
+            pred1_F, pred1_S = projection_visual(opt,pred1) 
+            pred2_F, pred2_S = projection_visual(opt,pred2)  
+            pred3_F, pred3_S = projection_visual(opt,pred3) 
+            pred4_F, pred4_S = projection_visual(opt,pred4) 
+            pred1_F = pred1_F.to(device)
+            pred1_S = pred1_S.to(device)
+            pred2_F = pred2_F.to(device)
+            pred2_S = pred2_S.to(device)
+            pred3_F = pred3_F.to(device)
+            pred3_S = pred3_S.to(device)
+            pred4_F = pred4_F.to(device)
+            pred4_S = pred4_S.to(device)
+            cost1 = loss(pred1_F,x_ray_F)
+            cost2 = loss(pred1_S,x_ray_S)
+            loss1 = cost1 + cost2
+            cost1 = loss(pred2_F,x_ray_F)
+            cost2 = loss(pred2_S,x_ray_S)
+            loss2 = cost1 + cost2
+            cost1 = loss(pred3_F,x_ray_F)
+            cost2 = loss(pred3_S,x_ray_S)
+            loss3 = cost1 + cost2
+            cost1 = loss(pred4_F,x_ray_F)
+            cost2 = loss(pred4_S,x_ray_S)
+            loss4 = cost1 + cost2
+            loss_res = loss4 + (alpha *(loss1 + loss2 + loss3))
+            if recurrences == 0:
+              init_loss = loss_res
+            loss_res.backward()
+            optimizer.step()
+            recurrences = recurrences + 1
+          feature_extractor2.load_state_dict(feature_extractor.state_dict())
+        
+          feature_extractor2.eval()
+          with torch.no_grad():
+            if b_i == 0:
+              res, temp_efmaps, temp_dfmaps = feature_extractor2(template)
+            else:
+              res, a, b = feature_extractor2(template)
+              for j in range(5):
+                temp_efmaps[j] = torch.concat((temp_efmaps[j],a[j]),dim=0)
+              for j in range(5):
+                temp_dfmaps[j] = torch.concat((temp_dfmaps[j],b[j]),dim=0)
+
+
+
+         
+          
+        
+            
+
+
+       
+
+
+            
+            
+        
+
+
+      else:
+        
+        temp_efmaps[0]= enc_fmaps[0].repeat(data[0].size()[0],1,1,1,1)
+        temp_efmaps[1]= enc_fmaps[1].repeat(data[0].size()[0],1,1,1,1)
+        temp_efmaps[2]= enc_fmaps[2].repeat(data[0].size()[0],1,1,1,1)
+        temp_efmaps[3]= enc_fmaps[3].repeat(data[0].size()[0],1,1,1,1)
+        temp_efmaps[4]= enc_fmaps[4].repeat(data[0].size()[0],1,1,1,1)
+        #print(data[0].size()[0])
+        #print(enc_fmaps[len(enc_fmaps)-1].size())
+        
+        
+        temp_dfmaps[0]= dec_fmaps[0].repeat(data[0].size()[0],1,1,1,1)
+        temp_dfmaps[1]= dec_fmaps[1].repeat(data[0].size()[0],1,1,1,1)
+        temp_dfmaps[2]= dec_fmaps[2].repeat(data[0].size()[0],1,1,1,1)
+        temp_dfmaps[3]= dec_fmaps[3].repeat(data[0].size()[0],1,1,1,1)
+        temp_dfmaps[4]= dec_fmaps[4].repeat(data[0].size()[0],1,1,1,1)
+
+      
+      
       iter_start_time = time.time()
 
       total_steps += 1
-
-      gan_model.set_input(data)
+    
+    
+      gan_model.set_input(input=data,enc_fmaps=temp_efmaps,dec_fmaps=temp_dfmaps)
       t0 = time.time()
       gan_model.optimize_parameters()
       t1 = time.time()
+
+      
 
       # if total_steps == 1:
       #   visualizer.add_graph(model=gan_model, input=gan_model.forward())
@@ -304,7 +416,7 @@ if __name__ == '__main__':
       # metrics_dict = gan_model.get_current_metrics()
       # visualizer.add_scalars('Train_Metrics', metrics_dict, step=total_steps)
       # visualizer.add_average_scalers('Epoch Metrics', metrics_dict, step=total_steps, write=False)
-
+     
       if total_steps % opt.print_freq == 0:
         print('total step: {} timer: {:.4f} sec.'.format(total_steps, t1 - t0))
         print('epoch {}/{}, step{}:{} || total loss:{:.4f}'.format(epoch, opt.niter + opt.niter_decay,
@@ -328,6 +440,7 @@ if __name__ == '__main__':
           except:
             dataloader_iter_for_discriminator = iter(dataloader)
       del(loss_dict)
+      
 
     # # save model every epoch
     # print('saving the latest model (epoch %d, total_steps %d)' %
@@ -355,21 +468,29 @@ if __name__ == '__main__':
     gan_model.update_learning_rate(epoch)
 
     # # Test
-    # if args.valid_dataset is not None:
-    #   if epoch % opt.save_epoch_freq == 0 or epoch==1:
-    #     gan_model.eval()
-    #     iter_valid_dataloader = iter(valid_dataloader)
-    #     for v_i in range(len(valid_dataloader)):
-    #       data = next(iter_valid_dataloader)
-    #       gan_model.set_input(data)
-    #       gan_model.test()
-    #
-    #       if v_i < opt.howmany_in_train:
-    #         visualizer.add_image('Test_Image', gan_model.get_current_visuals(), gan_model.get_normalization_list(), epoch*10+v_i, max_image=25)
-    #
-    #       # metrics
-    #       metrics_dict = gan_model.get_current_metrics()
-    #       visualizer.add_average_scalers('Epoch Test_Metrics', metrics_dict, step=total_steps, write=False)
-    #     visualizer.add_average_scalers('Epoch Test_Metrics', None, step=epoch, write=True)
-    #
-    #     gan_model.train()
+    
+    args.valid_dataset = None
+    if args.valid_dataset is not None:
+      
+      if epoch % 10 == 0 and epoch > 1:
+        gan_model.eval()
+        iter_valid_dataloader = iter(valid_dataloader)
+        for v_i in range(len(valid_dataloader)):
+
+        
+          data = next(iter_valid_dataloader)
+          
+
+          gan_model.set_input(input=data,enc_fmaps=temp_efmaps,dec_fmaps=temp_dfmaps)
+          gan_model.test()
+  
+          if v_i < opt.howmany_in_train:
+            visualizer.add_image('Test_Image', gan_model.get_current_visuals(), gan_model.get_normalization_list(), epoch*10+v_i, max_image=25)
+  
+          # metrics
+          metrics_dict = gan_model.get_current_metrics()
+          
+          visualizer.add_average_scalers('Epoch Test_Metrics', metrics_dict, step=total_steps, write=False)
+        visualizer.add_average_scalers('Epoch Test_Metrics', None, step=epoch, write=True)
+  
+        gan_model.train()

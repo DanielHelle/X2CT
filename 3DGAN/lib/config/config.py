@@ -120,7 +120,7 @@ __C.TRAIN.print_img_freq = 200
 # save model
 __C.TRAIN.save_latest_freq = 3000
 # save model frequent
-__C.TRAIN.save_epoch_freq = 5
+__C.TRAIN.save_epoch_freq = 1
 __C.TRAIN.begin_save_epoch = 0
 
 __C.TRAIN.weight_decay_if = False

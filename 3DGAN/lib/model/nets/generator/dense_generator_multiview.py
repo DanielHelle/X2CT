@@ -41,6 +41,7 @@ class UNetLike_DenseDimensionNet(nn.Module):
     self.n_downsampling = len(encoder_block_list)
     self.decoder_begin_size = decoder_begin_size
     self.decoder_feature_out = decoder_feature_out
+
     activation = nn.ReLU(True)
     bn_size = 4
 
@@ -195,8 +196,10 @@ class UNetLike_DenseDimensionNet(nn.Module):
 
 
 class MultiView_UNetLike_DenseDimensionNet(nn.Module):
-  def __init__(self, view1Model, view2Model, view1Order, view2Order, backToSub, decoder_output_channels, decoder_out_activation, decoder_block_list=None, decoder_norm_layer=nn.BatchNorm3d, upsample_mode='nearest'):
+  def __init__(self, view1Model, view2Model, view1Order, view2Order, backToSub, decoder_output_channels, decoder_out_activation, decoder_block_list=None, decoder_norm_layer=nn.BatchNorm3d, upsample_mode='nearest',useConnectionModules=True):
     super(MultiView_UNetLike_DenseDimensionNet, self).__init__()
+    #Could have to pass enc and dec fmaps to forward
+    self.useConnectionModules = useConnectionModules
     self.view1Model = view1Model
     self.view2Model = view2Model
     self.view1Order = view1Order
@@ -214,6 +217,202 @@ class MultiView_UNetLike_DenseDimensionNet(nn.Module):
       use_bias = decoder_norm_layer.func == nn.InstanceNorm3d
     else:
       use_bias = decoder_norm_layer == nn.InstanceNorm3d
+
+    self.batch_norm_enc1 = nn.BatchNorm3d(16)
+    self.batch_norm_enc2 = nn.BatchNorm3d(32)
+    self.batch_norm_enc3 = nn.BatchNorm3d(64)
+    self.batch_norm_enc4 = nn.BatchNorm3d(128)
+    self.batch_norm_enc5 = nn.BatchNorm3d(256)
+
+    self.batch_norm_dec1 = nn.BatchNorm3d(256)
+    self.batch_norm_dec2 = nn.BatchNorm3d(256)
+    self.batch_norm_dec3 = nn.BatchNorm3d(128)
+    self.batch_norm_dec4 = nn.BatchNorm3d(64)
+    self.batch_norm_dec5 = nn.BatchNorm3d(32)
+
+
+    self.fmap_fusion_layer0 = nn.Sequential(
+      #enc1 channels + dec5 channels + next_input channels
+      #conv so C is divided by 2 and then equal output channel
+      nn.Conv3d(16+32+16,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+      nn.BatchNorm3d(32),
+      nn.Conv3d(32,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+      nn.BatchNorm3d(32),
+      nn.Conv3d(32,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      
+    )
+    self.fmap_fusion_layer1 = nn.Sequential(
+      #enc2 channels + dec4 channels + next_input channels
+      nn.Conv3d(32+64+16,56,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(56),
+      nn.BatchNorm3d(56),
+      nn.Conv3d(56,56,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(56),
+      nn.BatchNorm3d(56),
+      nn.Conv3d(56,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+    )
+
+    self.fmap_fusion_layer2 = nn.Sequential(
+      nn.Conv3d(64+128+32,112,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(112),
+      nn.BatchNorm3d(112),
+      nn.Conv3d(112,112,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(112),
+      nn.BatchNorm3d(112),
+      nn.Conv3d(112,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+      nn.BatchNorm3d(32),
+      nn.Conv3d(32,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+    )
+
+    self.fmap_fusion_layer3 = nn.Sequential(
+      nn.Conv3d(128+256+64,224,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(224),
+      nn.BatchNorm3d(224),
+      nn.Conv3d(224,224,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(224),
+      nn.BatchNorm3d(224),
+      nn.Conv3d(224,64,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(64),
+      nn.BatchNorm3d(64),
+      nn.Conv3d(64,64,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(64),
+    )
+
+    self.fmap_fusion_layer4 = nn.Sequential(
+      nn.Conv3d(256+256+128,320,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(320),
+      nn.BatchNorm3d(320),
+      nn.Conv3d(320,320,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(320),
+      nn.BatchNorm3d(320),
+      nn.Conv3d(320,128,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(128),
+      nn.BatchNorm3d(128),
+      nn.Conv3d(128,128,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(128),
+
+    )
+
+    self.enc_fmap1_conv = nn.Sequential(
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      
+    )
+    self.enc_fmap2_conv = nn.Sequential(
+      nn.Conv3d(32,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      
+    )
+    self.enc_fmap3_conv = nn.Sequential(
+      nn.Conv3d(64,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+      nn.BatchNorm3d(32),
+      nn.Conv3d(32,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+      nn.BatchNorm3d(32),
+      nn.Conv3d(32,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+      
+    )
+    self.enc_fmap4_conv = nn.Sequential(
+      nn.Conv3d(128,64,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(64),
+      nn.BatchNorm3d(64),
+      nn.Conv3d(64,64,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(64),
+      nn.BatchNorm3d(64),
+      nn.Conv3d(64,64,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(64),
+      
+    )
+    self.enc_fmap5_conv = nn.Sequential(
+      nn.Conv3d(256,128,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(128),
+      nn.BatchNorm3d(128),
+      nn.Conv3d(128,128,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(128),
+      nn.BatchNorm3d(128),
+      nn.Conv3d(128,128,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(128),
+    
+    )
+    self.dec_fmap1_conv = nn.Sequential(
+      nn.Conv3d(256,128,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(128),
+      nn.BatchNorm3d(128),
+      nn.Conv3d(128,128,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(128),
+      nn.BatchNorm3d(128),
+      nn.Conv3d(128,128,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(128),
+      
+    )
+    self.dec_fmap2_conv = nn.Sequential(
+      nn.Conv3d(256,64,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(64),
+      nn.BatchNorm3d(64),
+      nn.Conv3d(64,64,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(64),
+      nn.BatchNorm3d(64),
+      nn.Conv3d(64,64,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(64),
+      
+    )
+    self.dec_fmap3_conv = nn.Sequential(
+      nn.Conv3d(128,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+      nn.BatchNorm3d(32),
+      nn.Conv3d(32,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+      nn.BatchNorm3d(32),
+      nn.Conv3d(32,32,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(32),
+    )
+    self.dec_fmap4_conv = nn.Sequential(
+      nn.Conv3d(64,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+    )
+    self.dec_fmap5_conv = nn.Sequential(
+      nn.Conv3d(32,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+      nn.BatchNorm3d(16),
+      nn.Conv3d(16,16,kernel_size=3,stride=1,padding=1),
+      nn.PReLU(16),
+    )
+
     ##############
     # Decoder
     ##############
@@ -262,9 +461,9 @@ class MultiView_UNetLike_DenseDimensionNet(nn.Module):
     self.transposed_layer = Transposed_And_Add(view1Order, view2Order)
 
   
-  def forward(self, input):
+  def forward(self, input,enc_fmaps,dec_fmaps):
     # only support two views 
-    assert len(input) == 3
+    assert len(input) == 2
     # View 1 encoding process
     view1_encoder_feature = self.view1Model.encoder_layer(input[0])
     view1_next_input = view1_encoder_feature
@@ -299,7 +498,70 @@ class MultiView_UNetLike_DenseDimensionNet(nn.Module):
           view_avg = self.transposed_layer(view1_next_input, view2_next_input) / 2
           view1_next_input = view_avg.permute(*self.view1Order)
           view2_next_input = view_avg.permute(*self.view2Order)
+          #print(" first IF i: {}, size: {}".format(i,view_avg.size()))
+          #for j in range(self.n_downsampling - 1, -2, -1):
+            #print(j)
+          #print(" first IF i: {}, size: {}".format(i,view_avg.size()))
           view_next_input = getattr(self, 'decoder_layer' + str(i))(view_avg)
+          """
+          print("view_next_input: {}".format(view_next_input.size()))
+          print("i: {}".format(i))
+          
+          print("enc_fmaps[{}]: {}".format(4,self.enc_fmap5_conv(enc_fmaps[4]).size()))
+          print("dec_fmaps[{}]: {}".format(4-4,self.dec_fmap1_conv(dec_fmaps[4-4]).size()))
+
+          print("enc_fmaps[{}]: {}".format(3,self.enc_fmap4_conv(enc_fmaps[3]).size()))
+          print("dec_fmaps[{}]: {}".format(4-3,self.dec_fmap2_conv(dec_fmaps[4-3]).size()))
+
+          print("enc_fmaps[{}]: {}".format(2,self.enc_fmap3_conv(enc_fmaps[2]).size()))
+          print("dec_fmaps[{}]: {}".format(4-2,self.dec_fmap3_conv(dec_fmaps[4-2]).size()))
+
+          print("enc_fmaps[{}]: {}".format(1,self.enc_fmap2_conv(enc_fmaps[1]).size()))
+          print("dec_fmaps[{}]: {}".format(4-1,self.dec_fmap4_conv(dec_fmaps[4-1]).size()))
+
+          print("enc_fmaps[{}]: {}".format(0,self.enc_fmap1_conv(enc_fmaps[0]).size()))
+          print("dec_fmaps[{}]: {}".format(4-0,self.dec_fmap5_conv(dec_fmaps[4-0]).size()))
+          """
+          if self.useConnectionModules and  i >0: #should be i >-1
+
+            #print(view_next_input.size())
+            #print(enc_fmaps[i].size())
+            #print(dec_fmaps[4-i].size())
+
+            view_next_input = getattr(self, 'fmap_fusion_layer' + str(i)) (torch.cat((view_next_input,getattr(self,"batch_norm_enc"+str(i+1))(enc_fmaps[i]),getattr(self,"batch_norm_dec"+str(5-i))(dec_fmaps[4-i])), dim=1))
+
+
+          """
+          if self.useConnectionModules:
+            if i == 0:
+              view_next_input = view_next_input + self.enc_fmap1_conv(enc_fmaps[i]) + self.dec_fmap5_conv(dec_fmaps[4-i])
+            elif i == 1:
+              view_next_input = view_next_input + self.enc_fmap2_conv(enc_fmaps[i]) + self.dec_fmap4_conv(dec_fmaps[4-i])
+            elif i == 2:
+              view_next_input = view_next_input + self.enc_fmap3_conv(enc_fmaps[i]) + self.dec_fmap3_conv(dec_fmaps[4-i])
+            elif i == 3:
+              view_next_input = view_next_input + self.enc_fmap4_conv(enc_fmaps[i]) + self.dec_fmap2_conv(dec_fmaps[4-i])
+            elif i == 4:
+              view_next_input = view_next_input + self.enc_fmap5_conv(enc_fmaps[i]) + self.dec_fmap1_conv(dec_fmaps[4-i])
+
+              """
+          """
+          else:
+            if i == 0:
+              view_avg = view_avg + enc_fmaps[i] + dec_fmaps[i]
+            elif i == 1:
+              view_avg = view_avg + enc_fmaps[i] + dec_fmaps[i]
+            elif i == 2:
+              view_avg = view_avg + enc_fmaps[i] + dec_fmaps[i]
+            elif i == 3:
+              view_avg = view_avg + enc_fmaps[i] + dec_fmaps[i]
+            elif i == 4:
+              view_avg = view_avg + enc_fmaps[i] + dec_fmaps[i]
+          """   
+
+          
+          #print("\n first IF idx: {}, pass 1, shape: {} \n".format(i,view_next_input.size()))
+
         # Method Two: Fused feature only used in main-branch
         else:
           view_avg = self.transposed_layer(view1_next_input, view2_next_input) / 2
@@ -316,7 +578,40 @@ class MultiView_UNetLike_DenseDimensionNet(nn.Module):
           view_avg = self.transposed_layer(view1_next_input, view2_next_input) / 2
           view1_next_input = view_avg.permute(*self.view1Order)
           view2_next_input = view_avg.permute(*self.view2Order)
+          #print("second IF i: {}, size: {}".format(i,view_avg.size()))
           view_next_input = getattr(self, 'decoder_layer' + str(i))(torch.cat((view_avg, view_next_input), dim=1))
+
+          if self.useConnectionModules and i>0: #should be i>-1
+    
+            
+            view_next_input = getattr(self, 'fmap_fusion_layer' + str(i)) (torch.cat((view_next_input,getattr(self,"batch_norm_enc"+str(i+1))(enc_fmaps[i]),getattr(self,"batch_norm_dec"+str(5-i))(dec_fmaps[4-i])), dim=1))
+          """
+          if self.useConnectionModules:
+            if i == 0:
+              view_next_input = view_next_input + self.enc_fmap1_conv(enc_fmaps[i]) + self.dec_fmap5_conv(dec_fmaps[4-i])
+            elif i == 1:
+              view_next_input = view_next_input + self.enc_fmap2_conv(enc_fmaps[i]) + self.dec_fmap4_conv(dec_fmaps[4-i])
+            elif i == 2:
+              view_next_input = view_next_input + self.enc_fmap3_conv(enc_fmaps[i]) + self.dec_fmap3_conv(dec_fmaps[4-i])
+            elif i == 3:
+              view_next_input = view_next_input + self.enc_fmap4_conv(enc_fmaps[i]) + self.dec_fmap2_conv(dec_fmaps[4-i])
+            elif i == 4:
+              view_next_input = view_next_input + self.enc_fmap5_conv(enc_fmaps[i]) + self.dec_fmap1_conv(dec_fmaps[4-i])
+          """
+          """
+          else:
+            if i == 0:
+              view_next_input = view_next_input + self.enc_fmap1_conv(enc_fmaps[i]) + self.dec_fmap5_conv(dec_fmaps[4-i])
+            elif i == 1:
+              view_next_input = view_next_input + self.enc_fmap2_conv(enc_fmaps[i]) + self.dec_fmap4_conv(dec_fmaps[4-i])
+            elif i == 2:
+              view_next_input = view_next_input + self.enc_fmap3_conv(enc_fmaps[i]) + self.dec_fmap3_conv(dec_fmaps[4-i])
+            elif i == 3:
+              view_next_input = view_next_input + self.enc_fmap4_conv(enc_fmaps[i]) + self.dec_fmap2_conv(dec_fmaps[4-i])
+            elif i == 4:
+              view_next_input = view_next_input + self.enc_fmap5_conv(enc_fmaps[i]) + self.dec_fmap1_conv(dec_fmaps[4-i])
+          """
+          #print("\n second IF idx: {}, pass 2, shape: {} \n".format(i,view_next_input.size()))
         # Method Two: Fused feature only used in main-branch
         else:
           view_avg = self.transposed_layer(view1_next_input, view2_next_input) / 2

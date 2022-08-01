@@ -130,24 +130,27 @@ class CTGAN(Base_Model):
     self.optimizer_D = torch.optim.Adam(self.netD.parameters(),
                                         lr=opt.lr, betas=(opt.beta1, opt.beta2))
 
-    #add optimizer for 3DUNet
-    #self.optimizers = []
-    #self.optimizers.append(self.optimizer_G)
-    #self.optimizers.append(self.optimizer_D)
+   
+    self.optimizers = []
+    self.optimizers.append(self.optimizer_G)
+    self.optimizers.append(self.optimizer_D)
 
   '''
     Train -Forward and Backward
   '''
-  def set_input(self, input):
+  def set_input(self, input, enc_fmaps, dec_fmaps):
     self.G_input1 = input[1][0].to(self.device)
     self.G_input2 = input[1][1].to(self.device)
+    self.enc_fmaps = enc_fmaps
+    self.dec_fmaps = dec_fmaps
     #template is the pretraining template
-    template = input[3][0].clone().detach()
-    template = torch.unsqueeze(template,dim=0)
-    template = template.to(self.device)
+
+    #template = input[3][0].clone().detach()
+    #template = torch.unsqueeze(template,dim=0)
+    #template = template.to(self.device)
     #Set input from Autoencoder for the finetuning stage
 
-    self.G_input3 = template
+    #self.G_input3 = template
   
 
     self.G_real = input[0].to(self.device)
@@ -232,7 +235,7 @@ class CTGAN(Base_Model):
     self.G_real is GT object
     '''
     # G_fake_D is [B 1 D H W]
-    self.G_fake_D1, self.G_fake_D2, self.G_fake_D = self.netG([self.G_input1, self.G_input2, self.G_input3])
+    self.G_fake_D1, self.G_fake_D2, self.G_fake_D = self.netG([self.G_input1, self.G_input2],self.enc_fmaps,self.dec_fmaps)
     # visual object should be [B D H W]
     self.G_fake = torch.squeeze(self.G_fake_D, 1)
     # input of Discriminator is [B 1 D H W]

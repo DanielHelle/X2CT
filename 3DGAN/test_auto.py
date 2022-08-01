@@ -10,6 +10,7 @@ from lib.config.config import cfg_from_yaml, cfg, merge_dict_and_yaml, print_eas
 from lib.dataset.factory import get_dataset
 from lib.model.factory import get_model
 from lib.model.multiView_AutoEncoder import ResUNet
+from lib.model.multiView_AutoEncoder import ResUNet2
 from lib.model.multiView_AutoEncoder import ResUNet_Down
 from lib.model.multiView_AutoEncoder import ResUNet_up
 from lib.utils.visualizer import tensor_back_to_unnormalization, tensor_back_to_unMinMax
@@ -208,7 +209,7 @@ if __name__ == '__main__':
 
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        autoencoder = ResUNet(in_channel=1,out_channel=1,training=False).to(device)
+        autoencoder = ResUNet2(in_channel=1,out_channel=1,training=False).to(device)
         autoencoder_path = os.path.join(opt.MODEL_SAVE_PATH,"autoencoder.pt")
         autoencoder.load_state_dict(torch.load(autoencoder_path))
         autoencoder.eval()
@@ -227,8 +228,9 @@ if __name__ == '__main__':
         #first batch size was 30
         #pretrain_auto["batch-print"] = 35
         
-        pretrain_auto["batch_size"] = 1  #max batch is 13
-        pretrain_auto["loss"] = torch.nn.L1Loss().to(device)
+        pretrain_auto["batch_size"] = 13  #max batch is 13
+        #pretrain_auto["loss"] = torch.nn.L1Loss().to(device)
+        pretrain_auto["loss"] = torch.nn.MSELoss(reduction='mean').to(device)
         #Gamma for next three items are 0.9
         #0.0001 err 0.0744 epoch 0 batch 30
         #0.00001 err 0.06 ep 0 batch 30 0.05-0.07
@@ -266,8 +268,8 @@ if __name__ == '__main__':
             with torch.no_grad():
 
                 X = data[0]
-                if template == None:
-                    template = data[3][0]
+                #if template == None:
+                #    template = data[3][0]
                     
                 X = torch.unsqueeze(X,1)
                     
@@ -302,7 +304,7 @@ if __name__ == '__main__':
         tot_psnr = pretrain_auto["running_psnr"]/len(dataloader_auto)
         tor_cos = pretrain_auto["running_cos"]/len(dataloader_auto)
 
-        tot_metrics["tot_l1_loss"] = tot_l1_loss
+        tot_metrics["tot_mse_loss"] = tot_l1_loss
         tot_metrics["tot_ssim"] = tot_ssim
         tot_metrics["tot_psnr"] = tot_psnr
         tot_metrics["tor_cos"] = tor_cos

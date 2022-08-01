@@ -1,11 +1,14 @@
 import os
+from re import template
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 import torch
 from lib.dataset.factory import get_dataset
-import SimpleITK as sitk
 import argparse
 import h5py
 import numpy as np
+import nibabel as nib
+
+#You might have to run this script in a separate environment because of incompatible dependencies
 
 class optDict():
     def __init__(self, dataset_class):
@@ -23,7 +26,7 @@ class optDict():
         self.XRAY1_MEAN_STD= [0.0, 1.0]
         self.XRAY2_MEAN_STD= [0.0, 1.0]
         self.nThreads= 5                                                       #3DGAN
-        self.TEMPLATE_DATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__),"data", "deepreg-data"))
+        self.TEMPLATE_DATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__),"data", "template-data"))
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -40,70 +43,75 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser = argparse.ArgumentParser()
     parser.add_argument(
-    "--createData",
-    help="Choose if you want to create data for template registration in data/deepreg-data/train/",
-    dest="createData",
-    action="store_true",
+        "--createTemplateData",
+        help="Choose if you want to create data for template registration in X2CT\3DGAN\data\template-data",
+        dest="createTemplateData",
+        default="0",
+        type=str,
+)
+    parser.add_argument(
+        "--convertToTensor",
+        help="Choose if you want to convert template.nii.gz to pytorch tensor and save it in X2CT\3DGAN\data\template-data",
+        dest="convertToTensor",
+        default="0",
+        type=str,
 )
     args = parser.parse_args()
-    args.createData = str2bool(args.createData)
+    args.createTemplateData = str2bool(args.createTemplateData)
+    args.convertToTensor = str2bool(args.convertToTensor)
     opt = optDict("align_ct_xray_views_std")
-    train_path = os.path.join(opt.TEMPLATE_DATA_PATH,"train","images.h5")
     
-    print()
 
+    if args.createTemplateData:
 
-    if args.createData:
-
-
-        # merge config with yaml
-        # merge config with argparse
-        
-
-        train_path = os.path.join(opt.TEMPLATE_DATA_PATH,"train","images.h5")
-        print(train_path)
-        N = 915 # find the length of my dataset
-        h5_file = h5py.File(train_path,"w")
-
-        h5_train = h5_file.create_dataset('data', shape=(N, 128, 128,128), dtype=np.float32, fillvalue=0)
+        data_path = opt.TEMPLATE_DATA_PATH
+        print(data_path)
         
         print(opt.dataset_class)
 
-        
         datasetClass, augmentationClass, dataTestClass, collateClass = get_dataset(opt.dataset_class)
         opt.data_augmentation = augmentationClass
+
+    
+        
+        for f in os.listdir(data_path):
+            os.remove(os.path.join(data_path, f))
 
 
         dataset = datasetClass(opt)
         dataloader = torch.utils.data.DataLoader(
             dataset,
-            batch_size=1 ,#915 total
-            shuffle=True,
+            batch_size=1 ,#916 total
+            shuffle=False,
             num_workers=int(opt.nThreads),
             collate_fn=collateClass)
+        vol_names = []
 
-        
-        #dtype torch.float32
         for idx, data in enumerate(dataloader):
-            ct = data[0]
-            ct = torch.squeeze(ct,dim=0)
-            h5_train[idx] = ct.numpy()
+            data = torch.squeeze(data[0],dim=0).numpy()
+            #open(os.path.join(data_path,"vol{}.npy".format(idx)))
+            #f = open(os.path.join(data_path,"vol{}.npy".format(idx)),"x")
+            np.save(os.path.join(data_path,"vol{}.npy".format(idx)), data)
+            vol_names.append("vol{}.npy".format(idx))
             
-           # f = h5py.File("file{}.h5".format(idx), 'w')
-        h5_file.close()
+            
+        f_txt = open(os.path.join(data_path,"data.txt"),"w")
+        for elem in vol_names:
+            f_txt.write(elem+"\n")
+        f_txt.close()
+    
+
+
+    if args.convertToTensor:
+        data_path = opt.TEMPLATE_DATA_PATH
+        template_path = os.path.join(data_path,"models","template.nii.gz")
+        template = nib.load(template_path)
+        template = np.array(template.dataobj)
+        template = torch.from_numpy(template)
+        torch.save(template, os.path.join(data_path,"models","template.pt"))
         
 
 
 
-    h5_file = h5py.File(train_path,"r")
-    print(h5_file.keys())
-    h5_cont = h5_file.get("data")
-    print(h5_cont.shape)
-    for idx in range(len(h5_cont)):
-        print(h5_cont[idx])
-        break
 
 
-    print(h5_cont[len(h5_cont)-1].shape)
-    print(np.sum(h5_cont[len(h5_cont)-1]))
-    h5_file.close()
