@@ -220,8 +220,8 @@ if __name__ == '__main__':
 
   
   recurrences = 0
-  #0.0005  conv to 122
-  lr = 0.005 #May need to be lower than during pretraining 
+ 
+  lr = 0.005 
   init_loss = 1000000
   loss_res= 0
   alpha = 0.5
@@ -278,14 +278,13 @@ if __name__ == '__main__':
           init_loss = 1000000
           feature_extractor = ResUNet2(in_channel=1,out_channel=1, training=True, out_fmap = False).to(device)
           feature_extractor.load_state_dict(torch.load(feature_extractor_path))
-          optimizer = optim.Adam(feature_extractor.parameters(),0.005) #0.005 is lr
+          optimizer = optim.Adam(feature_extractor.parameters(),0.005) 
           #scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma, verbose=True)
           recurrences = 0
           feature_extractor.train()
 
           while recurrences <= 13: #25 recurrences
-          # if  (abs(init_loss - loss_res)<= 1.2 and recurrences >= 7) or (loss_res > init_loss and (abs(init_loss - loss_res) >= 1.2) and recurrences >=6)  :
-            #  break
+        
             if recurrences > 0 and recurrences % 6 == 0:
               print("rec: {},init_loss: {}, loss_res: {}".format(recurrences,init_loss,loss_res, abs(init_loss - loss_res)))
             optimizer.zero_grad()

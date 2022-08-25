@@ -1,8 +1,21 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*
 !*.py
 *$py.class
+3DGAN/data/LIDC*
+
+/3DGAN/data/template-data/*.npy
+/3DGAN/data/template-data/models/init_template.nii.gz
+/3DGAN/data/template-data/models/template.nii.gz
+/3DGAN/data/template-data/models/template.pt
+/3DGAN/save_models/imported_models/multiView_CTGAN/LIDC256/d2_multiview2500/checkpoint/90/*
+/3DGAN/save_models/imported_models/singleView_CTGAN/LIDC256/d2_singleview2500/checkpoint/30/*
+/3DGAN/save_models/multiView_CTGAN/LIDC256/d2_multiview2500/checkpoint/*
+/3DGAN/save_models/multiView_CTGAN/LIDC256/d2_multiview2500/train_log/*
+/3DGAN/save_models/saved_states/*
+/3DGAN/save_models/singleView_CTGAN/LIDC256/d2_singleview2500/checkpoint/30/*
+/3DGAN/save_models/autoencoder.pt
+/3DGAN/save_models/feature_extractor.pt
 
 # C extensions
 *.so

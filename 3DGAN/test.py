@@ -175,8 +175,7 @@ def evaluate(args):
   gan_model.init_process(opt)
   total_steps, epoch_count = gan_model.setup(opt)
 
-  # must set to test Mode again, due to  omission of assigning mode to network layers
-  # model.training is test, but BN.training is training
+  
   if opt.verbose:
     print('## Model Mode: {}'.format('Training' if gan_model.training else 'Testing'))
     for i, v in gan_model.named_modules():
@@ -186,7 +185,7 @@ def evaluate(args):
     gan_model.eval()
   elif 'instance' in opt.norm_G:
     gan_model.eval()
-    # instance norm in training mode is better
+  
     for name, m in gan_model.named_modules():
       if m.__class__.__name__.startswith('InstanceNorm'):
         m.train()
@@ -214,7 +213,7 @@ def evaluate(args):
   feature_extractor.load_state_dict(torch.load(feature_extractor_path))
   #feature_extractor2 uses recurrently finetuned weights
   feature_extractor2 = ResUNet2(in_channel=1,out_channel=1, training=False, out_fmap = True).to(device)
-  #Probably unecessary to freeze encoder again
+ 
   for name, param in feature_extractor.named_parameters():
     if param.requires_grad and "down_conv" in name:
         param.requires_grad = False
@@ -256,21 +255,21 @@ def evaluate(args):
 
   avg_dict = dict()
 
-  #FINETUNE ONLY WITH BATCH_SIZE = 1, we cannot update weights based on several ct scans
+ 
   for epoch_i, data in tqdm.tqdm(enumerate(dataloader)):
-    #preform recurrent feature extraction
+    #does recurrent feature extraction
     if not opt.useConstFeatureMaps:
       loss_res = 0
       init_loss = 1000000
       recurrences = 0
       feature_extractor = ResUNet2(in_channel=1,out_channel=1, training=True, out_fmap = False).to(device)
       feature_extractor.load_state_dict(torch.load(feature_extractor_path))
-      optimizer = optim.Adam(feature_extractor.parameters(),0.005) #0.005 is lr dont want to use pointer to lr
+      optimizer = optim.Adam(feature_extractor.parameters(),0.005)
       scheduler = optim.lr_scheduler.ExponentialLR(optimizer,gamma, verbose=True)
       feature_extractor.train()
       #reload weights
       
-      while recurrences <= 100: #add or abs(init_loss - loss_res) < 0.0005 and
+      while recurrences <= 100: 
         if recurrences > 0 and recurrences  % 25 == 0: 
             print("rec: {},init_loss: {}, loss_res: {}".format(recurrences,init_loss,loss_res, abs(init_loss - loss_res)))
         if recurrences > 50 and recurrences < 100 and recurrences % 10 == 0:
@@ -327,9 +326,7 @@ def evaluate(args):
       temp_efmaps[2]= enc_fmaps[2].repeat(data[0].size()[0],1,1,1,1)
       temp_efmaps[3]= enc_fmaps[3].repeat(data[0].size()[0],1,1,1,1)
       temp_efmaps[4]= enc_fmaps[4].repeat(data[0].size()[0],1,1,1,1)
-      #print(data[0].size()[0])
-      #print(enc_fmaps[len(enc_fmaps)-1].size())
-      
+     
       
       temp_dfmaps[0]= dec_fmaps[0].repeat(data[0].size()[0],1,1,1,1)
       temp_dfmaps[1]= dec_fmaps[1].repeat(data[0].size()[0],1,1,1,1)

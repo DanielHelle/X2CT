@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import kornia
 
-#from torchsummary import summary
+
 
 
 def parse_args():
@@ -196,12 +196,7 @@ if __name__ == '__main__':
     pretrain_auto["batch_size"] = 5
     #pretrain_auto["loss"] = torch.nn.L1Loss().to(device)
     pretrain_auto["loss"] = torch.nn.MSELoss(reduction='mean')
-    #Gamma for next three items are 0.9
-    #0.0001 err 0.0744 epoch 0 batch 30
-    #0.00001 err 0.06 ep 0 batch 30 0.05-0.07
-    #lr = 0.0005 batch 35 err 0.043-0.05
 
-    #  for batch size 1, lr=0.00005
     pretrain_auto["optimizer"] = optim.Adam(autoencoder.parameters(),lr=0.000075)
 
     pretrain_auto["scheduler"] = optim.lr_scheduler.ExponentialLR(pretrain_auto["optimizer"],gamma=0.5, verbose=True)
@@ -391,8 +386,7 @@ if __name__ == '__main__':
             
         print(feature_extractor)
         
-            #Load pretrained X2CT model
-            #define and learn weights between X2CT and ResNet outputs
+          
         """
         gan_model = get_model(opt.model_class)()
         print('Model --{}-- will be Used'.format(gan_model.name))
@@ -510,7 +504,7 @@ if __name__ == '__main__':
                 pred3 = predicts[2]
                 pred4 = predicts[3]
 
-                #need to see if variable batch size works for projections i.e. [X, 1, 128, 128] 
+                
                 #F stands for Front and S stands for Side
                 pred1_F, pred1_S = projection_visual(opt,pred1) #Size [1, 1, 128, 128] 
                 pred2_F, pred2_S = projection_visual(opt,pred2) #Size [1, 1, 128, 128] 
