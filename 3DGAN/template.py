@@ -104,6 +104,9 @@ if __name__ == '__main__':
 
     if args.convertToTensor:
         data_path = opt.TEMPLATE_DATA_PATH
+        dirExists = os.path.exists(os.path.join(data_path,"models"))
+        if not dirExists:
+            os.mkdir(os.path.exists(os.path.join(data_path,"models")))
         template_path = os.path.join(data_path,"models","template.nii.gz")
         template = nib.load(template_path)
         template = np.array(template.dataobj)
